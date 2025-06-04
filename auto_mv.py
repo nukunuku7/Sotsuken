@@ -51,7 +51,7 @@ log_bins = np.logspace(np.log10(20), np.log10(SR / 2), N_BARS + 1, base=10)
 #     x, y = pos
 #     return x < -100 or x > screen.get_width() + 100 or y < -100 or y > screen.get_height() + 100
 
-def create_custom_log_bins(sr, n_bars, linear_cutoff=100, linear_ratio=0.7, min_freq=30):
+def create_custom_log_bins(sr, n_bars, linear_cutoff=500, linear_ratio=0.2, min_freq=30):
     """
     線形+対数のハイブリッドlog_binsを生成
     - linear_cutoff: 線形→対数の境界周波数

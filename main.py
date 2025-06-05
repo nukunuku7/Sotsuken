@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
 )
 import pygetwindow as gw
 
-from grid_editor import GridEditorDialog
+from Sotsuken.grid_editor import GridEditorDialog
 
 SETTINGS_DIR = "settings"  # 保存先ディレクトリ
 

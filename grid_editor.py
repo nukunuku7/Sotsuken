@@ -7,7 +7,7 @@ class GridEditorDialog(QDialog):
         super().__init__()
         self.setWindowTitle(f"{display_name} の端点編集")
         self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setStyleSheet("background-color: black;")
+        self.setStyleSheet("background-color: black;") # 黒に近いグレー
         self.resize(screen_geometry.width(), screen_geometry.height())
         
         self.scene = QGraphicsScene(0, 0, screen_geometry.width(), screen_geometry.height())
@@ -22,6 +22,7 @@ class GridEditorDialog(QDialog):
         self.draw_grid()
 
         self.ok_button = QPushButton("OK")
+        self.ok_button.setStyleSheet("background-color: #444444; color: white;")
         self.ok_button.clicked.connect(self.accept)
         self.layout.addWidget(self.ok_button)
 
@@ -41,6 +42,11 @@ class GridEditorDialog(QDialog):
     def draw_grid(self):
         rows, cols = 10, 10
         self.points = [[None for _ in range(cols)] for _ in range(rows)]
+
+        # 緑色のペン（太さ2）
+        grid_pen = QPen(Qt.green)
+        grid_pen.setWidth(2)
+
         for i in range(rows):
             for j in range(cols):
                 is_edge = i in [0, rows - 1] or j in [0, cols - 1]
@@ -50,27 +56,31 @@ class GridEditorDialog(QDialog):
                     self.scene.addItem(point)
                     self.points[i][j] = point
 
+        # 横方向のグリッド線（上下端）
         for i in range(cols - 1):
-            self.scene.addLine(*self.grid_points[0][i], *self.grid_points[0][i + 1])
-            self.scene.addLine(*self.grid_points[-1][i], *self.grid_points[-1][i + 1])
-        for i in range(rows - 1):
-            self.scene.addLine(*self.grid_points[i][0], *self.grid_points[i + 1][0])
-            self.scene.addLine(*self.grid_points[i][cols - 1], *self.grid_points[i + 1][cols - 1])
+            x1, y1 = self.grid_points[0][i]
+            x2, y2 = self.grid_points[0][i + 1]
+            self.scene.addLine(x1, y1, x2, y2, grid_pen)
 
-    def get_current_config(self):
-        return [
-            [
-                (point.pos().x(), point.pos().y()) if point else (None, None)
-                for point in row
-            ]
-            for row in self.points
-        ]
+            x1, y1 = self.grid_points[-1][i]
+            x2, y2 = self.grid_points[-1][i + 1]
+            self.scene.addLine(x1, y1, x2, y2, grid_pen)
+
+        # 縦方向のグリッド線（左右端）
+        for i in range(rows - 1):
+            x1, y1 = self.grid_points[i][0]
+            x2, y2 = self.grid_points[i + 1][0]
+            self.scene.addLine(x1, y1, x2, y2, grid_pen)
+
+            x1, y1 = self.grid_points[i][cols - 1]
+            x2, y2 = self.grid_points[i + 1][cols - 1]
+            self.scene.addLine(x1, y1, x2, y2, grid_pen)
 
 class EditablePoint(QGraphicsEllipseItem):
     def __init__(self, x, y, radius):
         super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.setBrush(QBrush(Qt.red))
-        self.setPen(QPen(Qt.black))
+        self.setPen(QPen(Qt.red))
         self.setFlag(QGraphicsEllipseItem.ItemIsMovable, True)
         self.setFlag(QGraphicsEllipseItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsEllipseItem.ItemSendsGeometryChanges, True)

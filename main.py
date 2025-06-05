@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import json
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
@@ -7,10 +8,12 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox, QMessageBox, QLabel, QComboBox
 )
 import pygetwindow as gw
-
-from Sotsuken.grid_editor import GridEditorDialog
+from grid_editor import GridEditorDialog
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"  # 保存先ディレクトリ
+
+def sanitize_filename(name):
+    return re.sub(r'[\\/:*?"<>|]', '_', name)
 
 class DisplaySelectionDialog(QDialog):
     def __init__(self, displays, parent=None):
@@ -89,24 +92,34 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
     def select_displays(self):
-        displays = [f"ディスプレイ {i}" for i in range(1, 4)]
+        screens = QApplication.screens()
+        displays = [f"{i}: {screen.name()}" for i, screen in enumerate(screens)]
         dialog = DisplaySelectionDialog(displays, self)
         if dialog.exec_():
             selected = dialog.selected_displays()
 
             for display in selected:
-                config = self.load_display_config(display)
-                # 仮のgeometryを設定（例: QRect(0, 0, 800, 600)）
-                from PyQt5.QtCore import QRect
-                geometry = QRect(0, 0, 800, 600)
-                editor = GridEditorDialog(display_name=display, config=config, screen_geometry=geometry)
+                # display名からインデックスを取得
+                selected_index = int(display.split(":")[0])
+                selected_screen = screens[selected_index]
+                geometry = selected_screen.geometry()
+                display_name = selected_screen.name()
+                config = self.load_display_config(display_name)
+                editor = GridEditorDialog(
+                    display_name=display_name,
+                    config=config,
+                    screen_geometry=geometry
+                )
+                editor.move(geometry.topLeft())
+                editor.showFullScreen()
                 if editor.exec_():
-                    self.save_display_config(display, editor.get_current_config())
+                    self.save_display_config(display_name, editor.get_current_config())
 
     def load_display_config(self, display_name):
         """設定をJSONから読み込む"""
         os.makedirs(SETTINGS_DIR, exist_ok=True)
-        path = os.path.join(SETTINGS_DIR, f"{display_name}.json")
+        safe_name = sanitize_filename(display_name)
+        path = os.path.join(SETTINGS_DIR, f"{safe_name}.json")
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -115,9 +128,11 @@ class MainWindow(QMainWindow):
     def save_display_config(self, display_name, config):
         """設定をJSONに保存する"""
         os.makedirs(SETTINGS_DIR, exist_ok=True)
-        path = os.path.join(SETTINGS_DIR, f"{display_name}.json")
+        safe_name = sanitize_filename(display_name)
+        path = os.path.join(SETTINGS_DIR, f"{safe_name}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
+
 
     def select_media(self):
         options = ["画像", "動画", "ウィンドウ"]

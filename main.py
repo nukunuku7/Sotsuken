@@ -10,7 +10,7 @@ import pygetwindow as gw
 
 from Sotsuken.grid_editor import GridEditorDialog
 
-SETTINGS_DIR = "settings"  # 保存先ディレクトリ
+SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"  # 保存先ディレクトリ
 
 class DisplaySelectionDialog(QDialog):
     def __init__(self, displays, parent=None):

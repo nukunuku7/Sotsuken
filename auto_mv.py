@@ -11,7 +11,6 @@ SR = 44100
 BLOCK_SIZE = 2048
 N_BARS = 128
 BAR_HEIGHT = 120
-RIPPLE_INTERVAL = 0.1  # 秒間隔で波紋生成
 BAR_WIDTH = 1200 // N_BARS
 
 # ======= Pygame初期化 =======
@@ -24,33 +23,7 @@ clock = pygame.time.Clock()
 # ======= ログスケール周波数ビン作成 =======
 log_bins = np.logspace(np.log10(20), np.log10(SR / 2), N_BARS + 1, base=10)
 
-# # ======= 流星情報 =======
-# meteors = []
-# last_meteor_time = 0
-# CENTER = (screen.get_width() // 2, screen.get_height() // 2)
-
-
-# def create_meteor():
-#     cx, cy = CENTER
-#     angle = random.uniform(0, 2 * np.pi)
-#     speed_init = 250  # 初速
-#     acc = 1000        # 加速度
-#     return {
-#         "pos": [cx, cy],
-#         "angle": angle,
-#         "speed": speed_init,
-#         "acc": acc,
-#         "start": time.time(),
-#         "duration": 3.0,
-#         "trail": [],
-#         "finished": False
-#     }
-
-
-# def out_of_screen(pos):
-#     x, y = pos
-#     return x < -100 or x > screen.get_width() + 100 or y < -100 or y > screen.get_height() + 100
-
+# ======= カスタムログスケールビン作成関数 =======
 def create_custom_log_bins(sr, n_bars, linear_cutoff=500, linear_ratio=0.2, min_freq=30):
     """
     線形+対数のハイブリッドlog_binsを生成
@@ -140,50 +113,8 @@ while running:
         color = (red, green, blue)
         pygame.draw.rect(screen, color, (x, y, BAR_WIDTH - 2, h))
 
-    # # === 流星生成 ===
-    # now = time.time()
-    # if now - last_meteor_time > RIPPLE_INTERVAL:
-    #     meteors.append(create_meteor())
-    #     last_meteor_time = now
-
-    # # === 流星描画 ===
-    # for m in meteors:
-    #     elapsed = now - m["start"]
-
-    #     # 加速移動
-    #     m["speed"] += m["acc"] * (1 / 60)
-    #     dx = np.cos(m["angle"]) * m["speed"] * (1 / 60)
-    #     dy = np.sin(m["angle"]) * m["speed"] * (1 / 60)
-    #     m["pos"][0] += dx
-    #     m["pos"][1] += dy
-
-    #     # トレイルを記録
-    #     m["trail"].append(tuple(m["pos"]))
-
-    #     # 端に到達したらフラグを立てる
-    #     if not m["finished"] and out_of_screen(m["pos"]):
-    #         m["finished"] = True
-
-    #     # 終了処理：トレイルがなくなったら削除
-    #     if m["finished"] and len(m["trail"]) == 0:
-    #         continue
-
-    #     # フェードアウト（後方から消す）
-    #     if m["finished"] and len(m["trail"]) > 0:
-    #         m["trail"].pop(0)
-
-    #     # 描画
-    #     surf = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
-    #     for i, pos in enumerate(m["trail"]):
-    #         alpha = int(255 * (i / len(m["trail"])) if len(m["trail"]) > 0 else 0)
-    #         pygame.draw.circle(surf, (180, 220, 255, alpha), (int(pos[0]), int(pos[1])), 2)
-    #     # 星本体
-    #     if not m["finished"]:
-    #         pygame.draw.circle(surf, (180, 220, 255, 255), (int(m["pos"][0]), int(m["pos"][1])), 2)
-    #     screen.blit(surf, (0, 0))
-
     pygame.display.flip()
-    clock.tick(60)
+    clock.tick(120)  # 120 FPS
 
 # ======= 終了処理 =======
 stream.stop()

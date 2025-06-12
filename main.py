@@ -48,15 +48,15 @@ class MainWindow(QMainWindow):
         self.display_button = QPushButton("ディスプレイ選択")
         self.display_button.clicked.connect(self.select_displays)
 
-        self.media_button = QPushButton("メディア選択")
-        self.media_button.clicked.connect(self.select_media)
-
         self.object_button = QPushButton("オブジェクト選択")
         self.object_button.clicked.connect(self.select_object)
 
+        self.media_button = QPushButton("メディア選択")
+        self.media_button.clicked.connect(self.select_media)
+
         layout.addWidget(self.display_button)
-        layout.addWidget(self.media_button)
         layout.addWidget(self.object_button)
+        layout.addWidget(self.media_button)
 
         central_widget = QWidget()
         central_widget.setLayout(layout)
@@ -100,6 +100,11 @@ class MainWindow(QMainWindow):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
 
+    def select_object(self):
+        file, _ = QFileDialog.getOpenFileName(self, "3Dオブジェクトを選択", "", "3D Files (*.stl *.obj *.ply *.glb *.gltf)")
+        if file:
+            QMessageBox.information(self, "選択されたファイル", file)
+
     def select_media(self):
         options = ["画像", "動画", "ウィンドウ"]
         dialog = QDialog(self)
@@ -133,11 +138,6 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(accept)
         buttons.rejected.connect(dialog.reject)
         dialog.exec_()
-
-    def select_object(self):
-        file, _ = QFileDialog.getOpenFileName(self, "3Dオブジェクトを選択", "", "3D Files (*.stl *.obj *.ply *.glb *.gltf)")
-        if file:
-            QMessageBox.information(self, "選択されたファイル", file)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

@@ -1,8 +1,7 @@
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem
-from PyQt5.QtCore import Qt, QPointF
-from PyQt5.QtGui import QBrush, QPen, QPainter
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsPixmapItem
+from PyQt5.QtCore import Qt, QRect, QBuffer, QByteArray
+from PyQt5.QtGui import QBrush, QPen, QPainter, QPixmap, QScreen, QImage, QGuiApplication
 import json
-import os
 
 class GridEditorDialog(QDialog):
     def __init__(self, display_name, config=None, screen_geometry=None):
@@ -14,6 +13,14 @@ class GridEditorDialog(QDialog):
         self.resize(screen_geometry.width(), screen_geometry.height())
 
         self.scene = QGraphicsScene(0, 0, screen_geometry.width(), screen_geometry.height())
+
+        # ディスプレイのスクリーンショットを背景に設定
+        screen = self.get_screen_by_geometry(screen_geometry)
+        if screen:
+            screenshot = screen.grabWindow(0)
+            pixmap_item = QGraphicsPixmapItem(screenshot)
+            self.scene.addItem(pixmap_item)
+
         self.view = ZoomableGraphicsView()
         self.view.setScene(self.scene)
 
@@ -29,6 +36,12 @@ class GridEditorDialog(QDialog):
         self.ok_button.setStyleSheet("background-color: #444444; color: white;")
         self.ok_button.clicked.connect(self.accept)
         self.layout.addWidget(self.ok_button)
+
+    def get_screen_by_geometry(self, geometry):
+        for screen in QGuiApplication.screens():
+            if screen.geometry() == geometry:
+                return screen
+        return None
 
     def load_or_create_grid(self, config, screen_geometry):
         if config:

@@ -1,124 +1,117 @@
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QGraphicsView, QGraphicsScene, QGraphicsEllipseItem, QGraphicsPixmapItem
-from PyQt5.QtCore import Qt, QRect, QBuffer, QByteArray
-from PyQt5.QtGui import QBrush, QPen, QPainter, QPixmap, QScreen, QImage, QGuiApplication
+# grid_editor.py
+import argparse
+import tkinter as tk
 import json
+import os
 
-class GridEditorDialog(QDialog):
-    def __init__(self, display_name, config=None, screen_geometry=None):
-        super().__init__()
-        self.display_name = display_name
-        self.setWindowTitle(f"{display_name} の端点編集")
-        self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setStyleSheet("background-color: black;")
-        self.resize(screen_geometry.width(), screen_geometry.height())
+POINT_RADIUS = 10
+SAVE_PATH = "./outlines"
+os.makedirs(SAVE_PATH, exist_ok=True)
 
-        self.scene = QGraphicsScene(0, 0, screen_geometry.width(), screen_geometry.height())
+class EditorCanvas(tk.Canvas):
+    def __init__(self, master, args, **kwargs):
+        super().__init__(master, **kwargs)
+        self.args = args
+        self.points = self.load_points()
+        self.dragging_point = None
+        self.bind("<ButtonPress-1>", self.on_press)
+        self.bind("<B1-Motion>", self.on_drag)
+        self.bind("<ButtonRelease-1>", self.on_release)
+        self.draw()
 
-        # ディスプレイのスクリーンショットを背景に設定
-        screen = self.get_screen_by_geometry(screen_geometry)
-        if screen:
-            screenshot = screen.grabWindow(0)
-            pixmap_item = QGraphicsPixmapItem(screenshot)
-            self.scene.addItem(pixmap_item)
+    def load_points(self):
+        filepath = os.path.join(SAVE_PATH, f"{self.args.display}_points.json")
+        if os.path.exists(filepath):
+            with open(filepath, "r") as f:
+                return json.load(f)
+        # 初期化（時計回りに四隅）
+        w, h = self.args.w, self.args.h
+        return [
+            [w * 0.2, h * 0.2],
+            [w * 0.8, h * 0.2],
+            [w * 0.8, h * 0.8],
+            [w * 0.2, h * 0.8]
+        ]
 
-        self.view = ZoomableGraphicsView()
-        self.view.setScene(self.scene)
+    def save_points(self):
+        filepath = os.path.join(SAVE_PATH, f"{self.args.display}_points.json")
+        with open(filepath, "w") as f:
+            json.dump(self.points, f)
 
-        self.layout = QVBoxLayout()
-        self.layout.addWidget(self.view)
-        self.setLayout(self.layout)
+    def draw(self):
+        self.delete("all")
+        # 背景マスク
+        self.create_rectangle(0, 0, self.args.w, self.args.h, fill="black")
 
-        self.rows, self.cols = 10, 10
-        self.grid_points = self.load_or_create_grid(config, screen_geometry)
-        self.draw_grid()
+        # 外周マスクの中を透過的に見せる
+        self.create_polygon(*sum(self.points, []), fill="gray20")
 
-        self.ok_button = QPushButton("OK")
-        self.ok_button.setStyleSheet("background-color: #444444; color: white;")
-        self.ok_button.clicked.connect(self.accept)
-        self.layout.addWidget(self.ok_button)
+        # 線（外周）
+        for i in range(len(self.points)):
+            x1, y1 = self.points[i]
+            x2, y2 = self.points[(i + 1) % len(self.points)]
+            self.create_line(x1, y1, x2, y2, fill="green", width=2)
 
-    def get_screen_by_geometry(self, geometry):
-        for screen in QGuiApplication.screens():
-            if screen.geometry() == geometry:
-                return screen
-        return None
+        # 点
+        for x, y in self.points:
+            self.create_oval(
+                x - POINT_RADIUS, y - POINT_RADIUS,
+                x + POINT_RADIUS, y + POINT_RADIUS,
+                fill="red"
+            )
 
-    def load_or_create_grid(self, config, screen_geometry):
-        if config:
-            return [[tuple(pt) for pt in row] for row in config]
-        return self.create_default_grid(screen_geometry)
+    def on_press(self, event):
+        for i, (x, y) in enumerate(self.points):
+            if abs(event.x - x) < POINT_RADIUS and abs(event.y - y) < POINT_RADIUS:
+                self.dragging_point = i
+                return
 
-    def create_default_grid(self, screen_geometry):
-        width = screen_geometry.width()
-        height = screen_geometry.height()
-        grid = []
-        for i in range(self.rows):
-            row = []
-            for j in range(self.cols):
-                x = width * j / (self.cols - 1)
-                y = height * i / (self.rows - 1)
-                row.append((x, y))
-            grid.append(row)
-        return grid
+    def on_drag(self, event):
+        if self.dragging_point is not None:
+            self.points[self.dragging_point] = [event.x, event.y]
+            self.save_points()
+            self.draw()
 
-    def draw_grid(self):
-        self.points = [[None for _ in range(self.cols)] for _ in range(self.rows)]
-        grid_pen = QPen(Qt.green)
-        grid_pen.setWidth(2)
+    def on_release(self, event):
+        self.dragging_point = None
 
-        for i in range(self.rows):
-            for j in range(self.cols):
-                is_edge = i in [0, self.rows - 1] or j in [0, self.cols - 1]
-                if is_edge:
-                    x, y = self.grid_points[i][j]
-                    point = EditablePoint(x, y, 5)
-                    self.scene.addItem(point)
-                    self.points[i][j] = point
 
-        for i in range(self.cols - 1):
-            self.add_line(0, i, 0, i + 1, grid_pen)
-            self.add_line(self.rows - 1, i, self.rows - 1, i + 1, grid_pen)
-        for i in range(self.rows - 1):
-            self.add_line(i, 0, i + 1, 0, grid_pen)
-            self.add_line(i, self.cols - 1, i + 1, self.cols - 1, grid_pen)
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', type=str, choices=['projector', 'editor'], required=True)
+    parser.add_argument('--display', type=str, required=True)
+    parser.add_argument('--x', type=int, required=True)
+    parser.add_argument('--y', type=int, required=True)
+    parser.add_argument('--w', type=int, required=True)
+    parser.add_argument('--h', type=int, required=True)
+    return parser.parse_args()
 
-    def add_line(self, i1, j1, i2, j2, pen):
-        x1, y1 = self.grid_points[i1][j1]
-        x2, y2 = self.grid_points[i2][j2]
-        self.scene.addLine(x1, y1, x2, y2, pen)
+def setup_window(args):
+    root = tk.Tk()
+    root.title(f"{args.mode.capitalize()} - {args.display}")
+    root.geometry(f"{args.w}x{args.h}+{args.x}+{args.y}")
+    root.attributes('-fullscreen', True)
+    return root
 
-    def get_current_config(self):
-        config = [[None for _ in range(self.cols)] for _ in range(self.rows)]
-        for i in range(self.rows):
-            for j in range(self.cols):
-                point = self.points[i][j]
-                if point:
-                    pos = point.scenePos()
-                    config[i][j] = (pos.x(), pos.y())
-                else:
-                    config[i][j] = self.grid_points[i][j]
-        return config
+def run_projector_mode(canvas, args):
+    canvas.create_text(args.w//2, args.h//2, text="Projector Mode", font=("Arial", 50), fill="white")
 
-class EditablePoint(QGraphicsEllipseItem):
-    def __init__(self, x, y, radius):
-        super().__init__(-radius, -radius, radius * 2, radius * 2)
-        self.setBrush(QBrush(Qt.red))
-        self.setPen(QPen(Qt.red))
-        self.setFlag(QGraphicsEllipseItem.ItemIsMovable, True)
-        self.setFlag(QGraphicsEllipseItem.ItemIsSelectable, True)
-        self.setFlag(QGraphicsEllipseItem.ItemSendsGeometryChanges, True)
-        self.setPos(x, y)
+def run_editor_mode(root, args):
+    canvas = EditorCanvas(root, args, width=args.w, height=args.h, bg="black")
+    canvas.pack(fill="both", expand=True)
 
-class ZoomableGraphicsView(QGraphicsView):
-    def __init__(self):
-        super().__init__()
-        self.setRenderHint(QPainter.Antialiasing)
-        self.setDragMode(QGraphicsView.ScrollHandDrag)
+def main():
+    args = parse_args()
+    root = setup_window(args)
 
-    def wheelEvent(self, event):
-        zoom_in_factor = 1.25
-        zoom_out_factor = 1 / zoom_in_factor
-        if event.angleDelta().y() > 0:
-            self.scale(zoom_in_factor, zoom_in_factor)
-        else:
-            self.scale(zoom_out_factor, zoom_out_factor)
+    if args.mode == 'editor':
+        run_editor_mode(root, args)
+    else:
+        canvas = tk.Canvas(root, width=args.w, height=args.h, bg="black")
+        canvas.pack(fill="both", expand=True)
+        run_projector_mode(canvas, args)
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()

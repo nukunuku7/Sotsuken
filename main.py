@@ -5,16 +5,29 @@ import json
 import subprocess
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
-    QDialog, QCheckBox,QDialogButtonBox, QMessageBox, QListWidget,
+    QDialog, QCheckBox, QDialogButtonBox, QMessageBox, QListWidget,
     QListWidgetItem
 )
 import pygetwindow as gw
-from grid_editor import GridEditorDialog
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 
 def sanitize_filename(name):
     return re.sub(r'[\\/:*?"<>|]', '_', name)
+
+def launch_grid_editor_remote_on_display(display_name, geometry):
+    x, y, w, h = geometry
+    cmd = [
+        sys.executable,
+        "grid_editor_remote.py",
+        "--display", display_name,
+        "--x", str(x), "--y", str(y),
+        "--w", str(w), "--h", str(h)
+    ]
+    subprocess.Popen(cmd)
+
+def get_config_path(display_name):
+    return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}.json")
 
 class DisplaySelectionDialog(QDialog):
     def __init__(self, displays, parent=None):
@@ -46,7 +59,6 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout()
 
-        # 明確に２つに分ける
         self.display_button = QPushButton("ディスプレイ選択")
         self.display_button.clicked.connect(self.select_displays)
 
@@ -71,24 +83,25 @@ class MainWindow(QMainWindow):
                 selected_screen = screens[selected_index]
                 geometry = selected_screen.geometry()
                 display_name = selected_screen.name()
-                config = self.load_display_config(display_name)
-                editor = GridEditorDialog(
-                    display_name=display_name,
-                    config=config,
-                    screen_geometry=geometry
+
+                json_path = get_config_path(display_name)
+                os.makedirs(SETTINGS_DIR, exist_ok=True)
+                if not os.path.exists(json_path):
+                    with open(json_path, 'w') as f:
+                        json.dump({}, f)
+
+                launch_grid_editor_remote_on_display(
+                    display_name,
+                    (geometry.x(), geometry.y(), geometry.width(), geometry.height())
                 )
-                editor.move(geometry.topLeft())
-                editor.showFullScreen()
-                if editor.exec_():
-                    self.save_display_config(display_name, editor.get_current_config())
 
     def select_window(self):
         import subprocess
-        from media_player_core import MediaPlayer  # media_player.py → media_player_core.py に変更
+        from media_player_core import MediaPlayer
 
         windows = [w.strip() for w in gw.getAllTitles() if w.strip()]
         if not windows:
-            QMessageBox.information(self, "ウィンドウ選択", "ウィンドウが見つかりませんでした")
+            QMessageBox.information(self, "ウィンドウ選択", "ウィンドウが見つかりません")
             return
 
         win_dialog = QDialog(self)
@@ -115,9 +128,8 @@ class MainWindow(QMainWindow):
                 player = MediaPlayer()
                 player.play_window_by_title(titles[0])
             elif len(titles) > 1:
-                # 複数ウィンドウ → media_player_multi.py を subprocess で起動
                 cmd = [
-                    sys.executable,  # python 実行パス
+                    sys.executable,
                     os.path.join(os.path.dirname(__file__), "media_player_multi.py"),
                     "--titles", *titles
                 ]
@@ -128,22 +140,6 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(on_accept)
         buttons.rejected.connect(win_dialog.reject)
         win_dialog.exec_()
-
-    def load_display_config(self, display_name):
-        os.makedirs(SETTINGS_DIR, exist_ok=True)
-        safe_name = sanitize_filename(display_name)
-        path = os.path.join(SETTINGS_DIR, f"{safe_name}.json")
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return None
-
-    def save_display_config(self, display_name, config):
-        os.makedirs(SETTINGS_DIR, exist_ok=True)
-        safe_name = sanitize_filename(display_name)
-        path = os.path.join(SETTINGS_DIR, f"{safe_name}.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

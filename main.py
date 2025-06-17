@@ -18,17 +18,18 @@ def sanitize_filename(name):
 import sys
 import subprocess
 
-def launch_grid_editor_on_display(display_name, geometry):
+def launch_grid_editor_remote_on_display(display_name, geometry):
     x, y, w, h = geometry
     cmd = [
         sys.executable,
-        "grid_editor.py",  # 修正：統合先ファイル名
-        "--mode", "editor",  # 必須：統合されたファイルでの動作モード指定
+        "grid_editor.py",
+        "--mode", "editor",
         "--display", display_name,
         "--x", str(x), "--y", str(y),
         "--w", str(w), "--h", str(h)
     ]
     subprocess.Popen(cmd)
+
 
 def get_config_path(display_name):
     return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}.json")
@@ -94,7 +95,7 @@ class MainWindow(QMainWindow):
                     with open(json_path, 'w') as f:
                         json.dump({}, f)
 
-                launch_grid_editor_on_display(
+                launch_grid_editor_remote_on_display(
                     display_name,
                     (geometry.x(), geometry.y(), geometry.width(), geometry.height())
                 )

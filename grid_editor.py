@@ -3,10 +3,16 @@ import argparse
 import tkinter as tk
 import json
 import os
+import re
 
-POINT_RADIUS = 10
-SAVE_PATH = "./outlines"
+def sanitize_filename(name):
+    return re.sub(r'[\\/:*?"<>|]', '_', name)
+
+SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
+SAVE_PATH = SETTINGS_DIR
 os.makedirs(SAVE_PATH, exist_ok=True)
+
+POINT_RADIUS = 10  # 点の半径（ピクセル単位）
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, args, **kwargs):
@@ -34,7 +40,7 @@ class EditorCanvas(tk.Canvas):
         ]
 
     def save_points(self):
-        filepath = os.path.join(SAVE_PATH, f"{self.args.display}_points.json")
+        filepath = os.path.join(SAVE_PATH, f"{sanitize_filename(self.args.display)}_points.json")
         with open(filepath, "w") as f:
             json.dump(self.points, f)
 

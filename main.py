@@ -1,12 +1,12 @@
-# main.py
 import sys
 import os
 import re
 import json
+import subprocess
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
-    QFileDialog, QDialog, QCheckBox,
-    QDialogButtonBox, QMessageBox, QComboBox
+    QDialog, QCheckBox,QDialogButtonBox, QMessageBox, QListWidget,
+    QListWidgetItem
 )
 import pygetwindow as gw
 from grid_editor import GridEditorDialog
@@ -46,14 +46,15 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout()
 
+        # 明確に２つに分ける
         self.display_button = QPushButton("ディスプレイ選択")
         self.display_button.clicked.connect(self.select_displays)
 
-        self.media_button = QPushButton("メディア選択")
-        self.media_button.clicked.connect(self.select_media)
+        self.window_button = QPushButton("ウィンドウ選択")
+        self.window_button.clicked.connect(self.select_window)
 
         layout.addWidget(self.display_button)
-        layout.addWidget(self.media_button)
+        layout.addWidget(self.window_button)
 
         central_widget = QWidget()
         central_widget.setLayout(layout)
@@ -81,6 +82,53 @@ class MainWindow(QMainWindow):
                 if editor.exec_():
                     self.save_display_config(display_name, editor.get_current_config())
 
+    def select_window(self):
+        import subprocess
+        from media_player_core import MediaPlayer  # media_player.py → media_player_core.py に変更
+
+        windows = [w.strip() for w in gw.getAllTitles() if w.strip()]
+        if not windows:
+            QMessageBox.information(self, "ウィンドウ選択", "ウィンドウが見つかりませんでした")
+            return
+
+        win_dialog = QDialog(self)
+        win_dialog.setWindowTitle("ウィンドウ選択")
+        layout = QVBoxLayout()
+
+        list_widget = QListWidget()
+        list_widget.setSelectionMode(QListWidget.MultiSelection)
+        for title in windows:
+            item = QListWidgetItem(title)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        win_dialog.setLayout(layout)
+
+        def on_accept():
+            selected_items = list_widget.selectedItems()
+            titles = [item.text() for item in selected_items]
+            win_dialog.accept()
+
+            if len(titles) == 1:
+                player = MediaPlayer()
+                player.play_window_by_title(titles[0])
+            elif len(titles) > 1:
+                # 複数ウィンドウ → media_player_multi.py を subprocess で起動
+                cmd = [
+                    sys.executable,  # python 実行パス
+                    os.path.join(os.path.dirname(__file__), "media_player_multi.py"),
+                    "--titles", *titles
+                ]
+                subprocess.Popen(cmd)
+            else:
+                QMessageBox.warning(self, "選択エラー", "ウィンドウが選択されていません")
+
+        buttons.accepted.connect(on_accept)
+        buttons.rejected.connect(win_dialog.reject)
+        win_dialog.exec_()
+
     def load_display_config(self, display_name):
         os.makedirs(SETTINGS_DIR, exist_ok=True)
         safe_name = sanitize_filename(display_name)
@@ -96,40 +144,6 @@ class MainWindow(QMainWindow):
         path = os.path.join(SETTINGS_DIR, f"{safe_name}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
-
-    def select_media(self):
-        options = ["画像", "動画", "ウィンドウ"]
-        dialog = QDialog(self)
-        dialog.setWindowTitle("メディアの種類を選択")
-        layout = QVBoxLayout()
-
-        combo = QComboBox()
-        combo.addItems(options)
-        layout.addWidget(combo)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        layout.addWidget(buttons)
-        dialog.setLayout(layout)
-
-        def accept():
-            choice = combo.currentText()
-            dialog.accept()
-            if choice == "画像":
-                file, _ = QFileDialog.getOpenFileName(self, "画像ファイルを選択", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)")
-                if file:
-                    QMessageBox.information(self, "選択された画像", file)
-            elif choice == "動画":
-                file, _ = QFileDialog.getOpenFileName(self, "動画ファイルを選択", "", "Videos (*.mp4 *.avi *.mov *.mkv)")
-                if file:
-                    QMessageBox.information(self, "選択された動画", file)
-            elif choice == "ウィンドウ":
-                windows = gw.getAllTitles()
-                msg = "\n".join([w for w in windows if w.strip()])
-                QMessageBox.information(self, "起動中ウィンドウ", msg or "検出できませんでした")
-
-        buttons.accepted.connect(accept)
-        buttons.rejected.connect(dialog.reject)
-        dialog.exec_()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

@@ -15,11 +15,15 @@ SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 def sanitize_filename(name):
     return re.sub(r'[\\/:*?"<>|]', '_', name)
 
-def launch_grid_editor_remote_on_display(display_name, geometry):
+import sys
+import subprocess
+
+def launch_grid_editor_on_display(display_name, geometry):
     x, y, w, h = geometry
     cmd = [
         sys.executable,
-        "grid_editor_remote.py",
+        "grid_editor.py",  # 修正：統合先ファイル名
+        "--mode", "editor",  # 必須：統合されたファイルでの動作モード指定
         "--display", display_name,
         "--x", str(x), "--y", str(y),
         "--w", str(w), "--h", str(h)
@@ -90,7 +94,7 @@ class MainWindow(QMainWindow):
                     with open(json_path, 'w') as f:
                         json.dump({}, f)
 
-                launch_grid_editor_remote_on_display(
+                launch_grid_editor_on_display(
                     display_name,
                     (geometry.x(), geometry.y(), geometry.width(), geometry.height())
                 )

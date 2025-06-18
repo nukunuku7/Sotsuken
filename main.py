@@ -1,3 +1,4 @@
+# main.py（歪み補正表示機能付き）
 import sys
 import os
 import re
@@ -15,21 +16,16 @@ SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 def sanitize_filename(name):
     return re.sub(r'[\\/:*?"<>|]', '_', name)
 
-import sys
-import subprocess
-
-def launch_grid_editor_remote_on_display(display_name, geometry):
+def launch_grid_editor(display_name, geometry):
     x, y, w, h = geometry
     cmd = [
-        sys.executable,
-        "grid_editor.py",
+        sys.executable, "grid_editor.py",
         "--mode", "editor",
         "--display", display_name,
         "--x", str(x), "--y", str(y),
         "--w", str(w), "--h", str(h)
     ]
     subprocess.Popen(cmd)
-
 
 def get_config_path(display_name):
     return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}.json")
@@ -40,21 +36,38 @@ class DisplaySelectionDialog(QDialog):
         self.setWindowTitle("ディスプレイ選択")
         self.layout = QVBoxLayout()
         self.checkboxes = []
-
         for display in displays:
             cb = QCheckBox(display)
             self.layout.addWidget(cb)
             self.checkboxes.append(cb)
-
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         self.layout.addWidget(self.button_box)
-
         self.setLayout(self.layout)
 
     def selected_displays(self):
         return [cb.text() for cb in self.checkboxes if cb.isChecked()]
+
+class WindowSelectionDialog(QDialog):
+    def __init__(self, windows, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ウィンドウ選択")
+        self.layout = QVBoxLayout()
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QListWidget.MultiSelection)
+        for title in windows:
+            item = QListWidgetItem(title)
+            self.list_widget.addItem(item)
+        self.layout.addWidget(self.list_widget)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        self.layout.addWidget(self.button_box)
+        self.setLayout(self.layout)
+
+    def selected_titles(self):
+        return [item.text() for item in self.list_widget.selectedItems()]
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -64,14 +77,13 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout()
 
-        self.display_button = QPushButton("ディスプレイ選択")
+        self.display_button = QPushButton("ディスプレイ選択（編集モード）")
         self.display_button.clicked.connect(self.select_displays)
-
-        self.window_button = QPushButton("ウィンドウ選択")
-        self.window_button.clicked.connect(self.select_window)
-
         layout.addWidget(self.display_button)
-        layout.addWidget(self.window_button)
+
+        self.launch_button = QPushButton("補正表示起動")
+        self.launch_button.clicked.connect(self.launch_correction_display)
+        layout.addWidget(self.launch_button)
 
         central_widget = QWidget()
         central_widget.setLayout(layout)
@@ -84,70 +96,44 @@ class MainWindow(QMainWindow):
         if dialog.exec_():
             selected = dialog.selected_displays()
             for display in selected:
-                selected_index = int(display.split(":")[0])
-                selected_screen = screens[selected_index]
-                geometry = selected_screen.geometry()
-                display_name = selected_screen.name()
+                idx = int(display.split(":")[0])
+                screen = screens[idx]
+                geometry = screen.geometry()
+                display_name = screen.name()
 
-                json_path = get_config_path(display_name)
                 os.makedirs(SETTINGS_DIR, exist_ok=True)
+                json_path = get_config_path(display_name)
                 if not os.path.exists(json_path):
                     with open(json_path, 'w') as f:
                         json.dump({}, f)
 
-                launch_grid_editor_remote_on_display(
-                    display_name,
-                    (geometry.x(), geometry.y(), geometry.width(), geometry.height())
-                )
+                launch_grid_editor(display_name, (geometry.x(), geometry.y(), geometry.width(), geometry.height()))
 
-    def select_window(self):
-        import subprocess
-        from media_player_core import MediaPlayer
-
+    def launch_correction_display(self):
         windows = [w.strip() for w in gw.getAllTitles() if w.strip()]
         if not windows:
-            QMessageBox.information(self, "ウィンドウ選択", "ウィンドウが見つかりません")
+            QMessageBox.warning(self, "警告", "ウィンドウが見つかりません")
             return
 
-        win_dialog = QDialog(self)
-        win_dialog.setWindowTitle("ウィンドウ選択")
-        layout = QVBoxLayout()
+        dialog = WindowSelectionDialog(windows, self)
+        if dialog.exec_():
+            selected_titles = dialog.selected_titles()
+            screens = QApplication.screens()
+            display_names = [screen.name() for screen in screens[:len(selected_titles)]]
 
-        list_widget = QListWidget()
-        list_widget.setSelectionMode(QListWidget.MultiSelection)
-        for title in windows:
-            item = QListWidgetItem(title)
-            list_widget.addItem(item)
-        layout.addWidget(list_widget)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        layout.addWidget(buttons)
-        win_dialog.setLayout(layout)
-
-        def on_accept():
-            selected_items = list_widget.selectedItems()
-            titles = [item.text() for item in selected_items]
-            win_dialog.accept()
-
-            if len(titles) == 1:
-                player = MediaPlayer()
-                player.play_window_by_title(titles[0])
-            elif len(titles) > 1:
+            if selected_titles:
                 cmd = [
                     sys.executable,
-                    os.path.join(os.path.dirname(__file__), "media_player_multi.py"),
-                    "--titles", *titles
+                    "media_player_multi.py",
+                    "--titles", *selected_titles,
+                    "--displays", *display_names
                 ]
                 subprocess.Popen(cmd)
             else:
-                QMessageBox.warning(self, "選択エラー", "ウィンドウが選択されていません")
-
-        buttons.accepted.connect(on_accept)
-        buttons.rejected.connect(win_dialog.reject)
-        win_dialog.exec_()
+                QMessageBox.warning(self, "警告", "ウィンドウが選択されていません")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
+    win = MainWindow()
+    win.show()
     sys.exit(app.exec_())

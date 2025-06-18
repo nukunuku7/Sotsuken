@@ -71,7 +71,7 @@ class ProjectorWindow(QWidget):
     def display_image(self, frame):
         h, w, ch = frame.shape
         bytes_per_line = ch * w
-        qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+        qt_image = QImage(frame.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
         self.label.setPixmap(QPixmap.fromImage(qt_image))
 
 

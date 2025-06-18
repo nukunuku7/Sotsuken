@@ -19,7 +19,8 @@ def sanitize_filename(name):
 def launch_grid_editor(display_name, geometry):
     x, y, w, h = geometry
     cmd = [
-        sys.executable, "grid_editor.py",
+        sys.executable,
+        os.path.join(os.path.dirname(__file__), "grid_editor.py"),
         "--mode", "editor",
         "--display", display_name,
         "--x", str(x), "--y", str(y),
@@ -124,7 +125,7 @@ class MainWindow(QMainWindow):
             if selected_titles:
                 cmd = [
                     sys.executable,
-                    "media_player_multi.py",
+                    os.path.join(os.path.dirname(__file__), "media_player_multi.py"),
                     "--titles", *selected_titles,
                     "--displays", *display_names
                 ]

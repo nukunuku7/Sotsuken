@@ -120,7 +120,15 @@ class MainWindow(QMainWindow):
         if dialog.exec_():
             selected_titles = dialog.selected_titles()
             screens = QApplication.screens()
-            display_names = [screen.name() for screen in screens[:len(selected_titles)]]
+
+            # 利用可能なディスプレイ名を順に取得
+            available_display_names = [screen.name() for screen in screens]
+            if len(selected_titles) > len(available_display_names):
+                QMessageBox.warning(self, "警告", "選択されたウィンドウ数がディスプレイ数を超えています")
+                return
+
+            # ウィンドウ数に合わせてディスプレイ名をスライス
+            display_names = available_display_names[:len(selected_titles)]
 
             if selected_titles:
                 cmd = [

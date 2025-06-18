@@ -1,4 +1,4 @@
-# media_player_multi.py（複数プロジェクター補正表示対応）
+# media_player_multi.py（ディスプレイ名に基づく正確な画面表示対応）
 import sys
 import numpy as np
 import pygetwindow as gw
@@ -17,13 +17,11 @@ def activate_window(hwnd):
     win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
     win32gui.SetForegroundWindow(hwnd)
 
-
 def get_window_by_title(title_part):
     return next((w for w in gw.getWindowsWithTitle(title_part) if title_part in w.title), None)
 
-
 class ProjectorWindow(QWidget):
-    def __init__(self, window_title, screen_index=0, display_name="Display", window_id=None):
+    def __init__(self, window_title, display_index=0, display_name="Display", window_id=None):
         super().__init__()
         self.setWindowTitle(f"Projector {window_id}")
         self.label = QLabel(self)
@@ -41,10 +39,10 @@ class ProjectorWindow(QWidget):
         self.display_name = display_name
 
         screens = QApplication.screens()
-        if screen_index >= len(screens):
-            raise RuntimeError(f"指定されたディスプレイ index={screen_index} が存在しません")
+        if display_index >= len(screens):
+            raise RuntimeError(f"ディスプレイ index={display_index} が存在しません")
 
-        geometry = screens[screen_index].geometry()
+        geometry = screens[display_index].geometry()
         self.setGeometry(geometry)
         self.showFullScreen()
 
@@ -79,10 +77,12 @@ def main(window_titles, display_names):
     app = QApplication(sys.argv)
     windows = []
 
+    screens = QApplication.screens()  # 必ず一度取得して index が使えるようにする
+
     for i, title in enumerate(window_titles):
         try:
-            name = display_names[i] if i < len(display_names) else f"Display{i}"
-            win = ProjectorWindow(title, screen_index=i, display_name=name, window_id=i)
+            # indexに応じた表示位置を保証（名前は見た目用）
+            win = ProjectorWindow(title, display_index=i, display_name=display_names[i], window_id=i)
             windows.append(win)
         except Exception as e:
             print(f"[Error] {title}: {e}")

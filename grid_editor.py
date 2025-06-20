@@ -1,9 +1,10 @@
-# grid_editor.py（ズーム・パン対応）
+# grid_editor.py（ズーム・パン・自動補正初期グリッド連携対応）
 import argparse
 import tkinter as tk
 import json
 import os
 import re
+import math
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 os.makedirs(SETTINGS_DIR, exist_ok=True)
@@ -29,11 +30,32 @@ def generate_perimeter_points(w, h, div):
     return points
 
 
+def get_point_path(display_name):
+    return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}_points.json")
+
+
+def load_or_generate_points(display_name, w, h):
+    path = get_point_path(display_name)
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    else:
+        # 自動補正向け初期グリッドを生成
+        return generate_perimeter_points(w, h, GRID_DIV)
+
+
+def save_points(display_name, points):
+    path = get_point_path(display_name)
+    with open(path, "w") as f:
+        json.dump(points, f)
+
+
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, args, **kwargs):
         super().__init__(master, **kwargs)
         self.args = args
-        self.points = self.load_points()
+        self.display_name = args.display
+        self.points = load_or_generate_points(self.display_name, args.w, args.h)
         self.dragging_point = None
 
         self.scale = 1.0
@@ -55,21 +77,6 @@ class EditorCanvas(tk.Canvas):
 
     def world_to_canvas(self, x, y):
         return x * self.scale + self.offset_x, y * self.scale + self.offset_y
-
-    def get_point_path(self):
-        return os.path.join(SETTINGS_DIR, f"{sanitize_filename(self.args.display)}_points.json")
-
-    def load_points(self):
-        path = self.get_point_path()
-        if os.path.exists(path):
-            with open(path, "r") as f:
-                return json.load(f)
-        return generate_perimeter_points(self.args.w, self.args.h, GRID_DIV)
-
-    def save_points(self):
-        path = self.get_point_path()
-        with open(path, "w") as f:
-            json.dump(self.points, f)
 
     def draw(self):
         self.delete("all")
@@ -94,12 +101,12 @@ class EditorCanvas(tk.Canvas):
         if self.dragging_point is not None:
             wx, wy = self.canvas_to_world(event.x, event.y)
             self.points[self.dragging_point] = [wx, wy]
-            self.save_points()
+            save_points(self.display_name, self.points)
             self.draw()
 
     def on_release(self, event):
         self.dragging_point = None
-        self.save_points()
+        save_points(self.display_name, self.points)
         self.draw()
 
     def on_zoom(self, event):

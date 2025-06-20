@@ -58,10 +58,7 @@ def auto_generate_from_environment():
     if len(screen_defs) > len(screen_map):
         print("[警告] スクリーン数が接続ディスプレイより多いです")
 
-    for i, screen_def in enumerate(screen_defs):
-        if i >= len(screen_map):
-            break
-        screen = screen_map[i]
+    for (i, screen), screen_def in zip(screen_map.items(), screen_defs):
         name = screen.name()
         geom = screen.geometry()
         w, h = geom.width(), geom.height()

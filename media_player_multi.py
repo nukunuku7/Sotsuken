@@ -1,13 +1,11 @@
-# media_player_multi.py（射影モード切替対応版）
+# media_player_multi.py（編集ディスプレイ全体キャプチャ対応）
 import sys
 import numpy as np
-import mss
 import os
 import json
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QGuiApplication
 from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QGuiApplication
 from warp_engine import warp_image
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
@@ -20,7 +18,7 @@ def load_edit_profile():
     return None
 
 class ProjectorWindow(QWidget):
-    def __init__(self, display_name, screen, window_id, mode="perspective"):
+    def __init__(self, display_name, screen, edit_screen, window_id, mode="perspective"):
         super().__init__()
         self.setWindowTitle(f"Projector {window_id}")
         self.label = QLabel(self)
@@ -31,33 +29,35 @@ class ProjectorWindow(QWidget):
 
         self.display_name = display_name
         self.screen = screen
+        self.edit_screen = edit_screen
+        self.mode = mode
+
         self.geometry = screen.geometry()
         self.setGeometry(self.geometry)
         self.showFullScreen()
 
-        self.mode = mode
-        self.sct = mss.mss()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)
 
     def update_frame(self):
-        img = self.capture_display()
+        img = self.capture_edit_screen()
         if img is None:
             return
         corrected = warp_image(img, self.display_name, mode=self.mode)
         self.display_image(corrected)
 
-    def capture_display(self):
-        geom = self.geometry
-        monitor = {
-            "top": geom.y(),
-            "left": geom.x(),
-            "width": geom.width(),
-            "height": geom.height()
-        }
-        img = np.array(self.sct.grab(monitor))[:, :, :3]
-        return img
+    def capture_edit_screen(self):
+        if not self.edit_screen:
+            return None
+        pixmap = self.edit_screen.grabWindow(0)
+        image = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
+        width = image.width()
+        height = image.height()
+        ptr = image.bits()
+        ptr.setsize(height * width * 3)
+        arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 3))
+        return arr
 
     def display_image(self, frame):
         h, w, ch = frame.shape
@@ -68,17 +68,17 @@ class ProjectorWindow(QWidget):
 
 def main(display_names, mode="perspective"):
     app = QApplication(sys.argv)
-    windows = []
-
     screens = QGuiApplication.screens()
     edit_display_name = load_edit_profile()
+    edit_screen = next((s for s in screens if s.name() == edit_display_name), None)
 
+    windows = []
     for i, screen in enumerate(screens):
         name = screen.name()
         if name not in display_names or name == edit_display_name:
             continue
         try:
-            win = ProjectorWindow(name, screen, window_id=i, mode=mode)
+            win = ProjectorWindow(name, screen, edit_screen, window_id=i, mode=mode)
             windows.append(win)
         except Exception as e:
             print(f"[Error] {name}: {e}")

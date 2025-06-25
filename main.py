@@ -1,4 +1,4 @@
-# main.py（編集用ディスプレイ認識＋出力反映対応）
+# main.py（編集用ディスプレイ認識＋モード別初期グリッド生成対応）
 import sys
 import os
 import re
@@ -17,9 +17,6 @@ os.makedirs(SETTINGS_DIR, exist_ok=True)
 def sanitize_filename(name):
     return re.sub(r'[\\/:*?"<>|]', '_', name)
 
-def get_config_path(display_name):
-    return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}.json")
-
 def save_edit_profile(display_name):
     with open(EDIT_PROFILE_PATH, "w") as f:
         json.dump({"display": display_name}, f)
@@ -30,12 +27,12 @@ def load_edit_profile():
             return json.load(f).get("display")
     return None
 
-def launch_grid_editor(display_name, geometry):
+def launch_grid_editor(display_name, geometry, mode):
     x, y, w, h = geometry
     cmd = [
         sys.executable,
         os.path.join(os.path.dirname(__file__), "grid_editor.py"),
-        "--mode", "editor",
+        "--mode", mode,
         "--display", display_name,
         "--x", str(x), "--y", str(y),
         "--w", str(w), "--h", str(h)
@@ -53,7 +50,6 @@ class MainWindow(QMainWindow):
         self.label = QLabel("編集用ディスプレイ：未認識")
         layout.addWidget(self.label)
 
-        # 補正方式選択用ラベルとコンボボックス
         self.mode_selector = QComboBox()
         self.mode_selector.addItems(["perspective", "warp_map"])
         layout.addWidget(QLabel("補正方式を選択："))
@@ -81,16 +77,13 @@ class MainWindow(QMainWindow):
 
     def auto_launch_editors(self):
         screens = QGuiApplication.screens()
+        mode = self.mode_selector.currentText()
         for screen in screens:
             display_name = screen.name()
             if display_name == self.edit_display_name:
                 continue
             geometry = screen.geometry()
-            json_path = get_config_path(display_name)
-            if not os.path.exists(json_path):
-                with open(json_path, 'w') as f:
-                    json.dump({}, f)
-            launch_grid_editor(display_name, (geometry.x(), geometry.y(), geometry.width(), geometry.height()))
+            launch_grid_editor(display_name, (geometry.x(), geometry.y(), geometry.width(), geometry.height()), mode)
 
     def launch_correction_display(self):
         screens = QGuiApplication.screens()
@@ -100,8 +93,7 @@ class MainWindow(QMainWindow):
         if not display_names:
             QMessageBox.warning(self, "警告", "表示可能なプロジェクターが見つかりません")
             return
-        
-        # 選択された補正方式を取得
+
         mode = self.mode_selector.currentText()
 
         cmd = [

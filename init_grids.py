@@ -1,4 +1,4 @@
-# init_grids.py（環境定義に基づく射影用グリッド自動生成）
+# init_grids.py（環境定義に基づくモード別グリッド自動生成対応）
 import os
 import json
 import re
@@ -8,9 +8,10 @@ from settings.config.environment_config import environment
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 POINT_SUFFIX = "_points.json"
+GRID_DIV = 10  # 外周分割数
 
 def sanitize_filename(name):
-    return re.sub(r'[\\/:*?"<>|]', '_', name)
+    return re.sub(r'[\/:*?"<>|]', '_', name)
 
 def save_points(display_name, points):
     path = os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}{POINT_SUFFIX}")
@@ -25,16 +26,14 @@ def load_edit_profile():
     return None
 
 def generate_quad_points(center, normal, width=0.8, height=0.6):
-    # 法線ベクトルから横軸・縦軸を生成
     n = normalize(normal)
     up = [0, 0, 1] if abs(n[2]) < 0.9 else [0, 1, 0]
     x_axis = normalize(cross(up, n))
     y_axis = normalize(cross(n, x_axis))
-    # 四隅の点計算（左上→右上→右下→左下）
     corners = []
     for dx, dy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
         px = [center[i] + dx * width/2 * x_axis[i] + dy * height/2 * y_axis[i] for i in range(3)]
-        corners.append(px[:2])  # x, yのみ使用
+        corners.append(px[:2])
     return corners
 
 def cross(a, b):
@@ -48,7 +47,19 @@ def normalize(v):
     mag = math.sqrt(sum(x**2 for x in v))
     return [x / mag for x in v]
 
-def auto_generate_from_environment():
+def generate_perimeter_points(w, h, div=10):
+    points = []
+    for i in range(div):
+        points.append([w * i / (div - 1), 0])
+    for i in range(1, div - 1):
+        points.append([w, h * i / (div - 1)])
+    for i in reversed(range(div)):
+        points.append([w * i / (div - 1), h])
+    for i in reversed(range(1, div - 1)):
+        points.append([0, h * i / (div - 1)])
+    return points
+
+def auto_generate_from_environment(mode="perspective"):
     app = QGuiApplication([])
     screens = QGuiApplication.screens()
     edit_display = load_edit_profile()
@@ -63,20 +74,25 @@ def auto_generate_from_environment():
         geom = screen.geometry()
         w, h = geom.width(), geom.height()
 
-        # スクリーン構造に基づく射影点生成
-        quad = generate_quad_points(
-            screen_def["center"],
-            screen_def["normal"],
-            width=screen_def.get("width", 1.2),
-            height=screen_def.get("height", 0.9)
-        )
+        if mode == "warp_map":
+            points = generate_perimeter_points(w, h, div=GRID_DIV)
+        else:
+            quad = generate_quad_points(
+                screen_def["center"],
+                screen_def["normal"],
+                width=screen_def.get("width", 1.2),
+                height=screen_def.get("height", 0.9)
+            )
+            points = [[(x + 1) * w/2, (y + 1) * h/2] for x, y in quad]
 
-        # 解像度に対してスケーリング（仮に原点を中心として）
-        scaled = [[(x + 1) * w/2, (y + 1) * h/2] for x, y in quad]  # [-1,1] → pixel座標
-        save_points(name, scaled)
-        print(f"✔ グリッド生成: {name} → 4点")
+        save_points(name, points)
+        print(f"✔ グリッド生成: {name} → {len(points)}点（モード: {mode}）")
 
     print("🎉 全ディスプレイのグリッド生成完了")
 
 if __name__ == "__main__":
-    auto_generate_from_environment()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["perspective", "warp_map"], default="perspective")
+    args = parser.parse_args()
+    auto_generate_from_environment(mode=args.mode)

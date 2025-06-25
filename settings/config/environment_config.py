@@ -1,26 +1,26 @@
-# environment_config.py（360°投影環境の構造定義）
+# environment_config.py (360° Projection Environment)
 
-# 各種オブジェクトの座標はメートル単位で定義
-# 中心点・法線ベクトル・FOVなどを使い、3D空間における位置関係をモデル化します
+# Units in meters
+# This configuration models a room with 3 screens and 3 projectors (360-degree setup)
 
 environment = {
     "screens": [
         {
             "id": "screen1",
-            "center": [0.0, 1.5, 0.0],         # 正面スクリーンの中心座標
-            "normal": [1.0, 0.0, 0.0],         # 正面方向を向く
-            "radius": 1.5                      # 曲面スクリーン半径（仮定）
+            "center": [0.0, 1.5, 0.0],        # Front screen center
+            "normal": [1.0, 0.0, 0.0],        # Facing +X direction
+            "radius": 1.5                     # Curved screen radius
         },
         {
             "id": "screen2",
-            "center": [0.0, -1.5, 0.0],        # 背面スクリーンの中心
-            "normal": [-1.0, 0.0, 0.0],        # 背面方向を向く
+            "center": [0.0, -1.5, 0.0],       # Rear screen center
+            "normal": [-1.0, 0.0, 0.0],       # Facing -X direction
             "radius": 1.5
         },
         {
             "id": "screen3",
-            "center": [0.0, 0.0, 1.5],         # 側面スクリーンの中心
-            "normal": [0.0, 1.0, 0.0],         # 上方向を向く
+            "center": [0.0, 0.0, 1.5],        # Top screen center
+            "normal": [0.0, 1.0, 0.0],        # Facing +Y (vertical up)
             "radius": 1.5
         }
     ],
@@ -28,23 +28,24 @@ environment = {
     "projectors": [
         {
             "id": "proj1",
-            "position": [-3.0, 1.5, 1.2],      # スクリーン1用プロジェクター
-            "fov": 100.0                       # 視野角（水平）
+            "position": [-3.0, 1.5, 1.2],     # Projector for screen1
+            "fov": 100.0                      # Horizontal field of view
         },
         {
             "id": "proj2",
-            "position": [-3.0, -1.5, 1.2],     # スクリーン2用プロジェクター
+            "position": [-3.0, -1.5, 1.2],    # Projector for screen2
             "fov": 100.0
         },
         {
             "id": "proj3",
-            "position": [-3.0, 0.0, 2.0],      # スクリーン3用プロジェクター
+            "position": [-3.0, 0.0, 2.0],     # Projector for screen3
             "fov": 100.0
         }
     ],
 
     "mirror": {
-        "center": [-1.5, 0.0, 1.5],
-        "radius": 0.6                         # 凸面鏡半径
+        "enabled": True,
+        "center": [-1.5, 0.0, 1.5],           # Spherical mirror center
+        "radius": 0.6                        # Radius of curvature (convex)
     }
 }

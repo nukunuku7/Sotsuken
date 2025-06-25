@@ -1,4 +1,4 @@
-# grid_editor.py（ズーム・パン・自動補正初期グリッド連携対応）
+# grid_editor.py（ズーム・パン・自動補正初期グリッド連携対応＋モード別初期グリッド）
 import argparse
 import tkinter as tk
 import json
@@ -12,10 +12,8 @@ os.makedirs(SETTINGS_DIR, exist_ok=True)
 POINT_RADIUS = 8
 GRID_DIV = 10
 
-
 def sanitize_filename(name):
-    return re.sub(r'[\\/:*?"<>|]', '_', name)
-
+    return re.sub(r'[\/:*?"<>|]', '_', name)
 
 def generate_perimeter_points(w, h, div):
     points = []
@@ -29,33 +27,40 @@ def generate_perimeter_points(w, h, div):
         points.append([0, h * i / (div - 1)])
     return points
 
-
 def get_point_path(display_name):
     return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}_points.json")
 
+def generate_quad(w, h):
+    margin = 0.05
+    return [
+        [w * margin, h * margin],
+        [w * (1 - margin), h * margin],
+        [w * (1 - margin), h * (1 - margin)],
+        [w * margin, h * (1 - margin)]
+    ]
 
-def load_or_generate_points(display_name, w, h):
+def load_or_generate_points(display_name, w, h, mode):
     path = get_point_path(display_name)
     if os.path.exists(path):
         with open(path, "r") as f:
             return json.load(f)
     else:
-        # 自動補正向け初期グリッドを生成
-        return generate_perimeter_points(w, h, GRID_DIV)
-
+        if mode == "perspective":
+            return generate_quad(w, h)
+        else:
+            return generate_quad(w, h, GRID_DIV)
 
 def save_points(display_name, points):
     path = get_point_path(display_name)
     with open(path, "w") as f:
         json.dump(points, f)
 
-
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, args, **kwargs):
         super().__init__(master, **kwargs)
         self.args = args
         self.display_name = args.display
-        self.points = load_or_generate_points(self.display_name, args.w, args.h)
+        self.points = self.load_initial_points()
         self.dragging_point = None
 
         self.scale = 1.0
@@ -129,11 +134,21 @@ class EditorCanvas(tk.Canvas):
             self.offset_y += dy
             self.drag_start = (event.x, event.y)
             self.draw()
+    
+    def load_initial_points(self):
+        path = get_point_path(self.display_name)
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                return json.load(f)
+        if self.args.mode == "perspective":
+            return generate_quad(self.args.w, self.args.h)
+        else:
+            return generate_perimeter_points(self.args.w, self.args.h, GRID_DIV)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['editor', 'projector'], required=True)
+    parser.add_argument('--mode', choices=['perspective', 'warp_map'], required=True)
     parser.add_argument('--display', type=str, required=True)
     parser.add_argument('--x', type=int, required=True)
     parser.add_argument('--y', type=int, required=True)

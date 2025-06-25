@@ -1,4 +1,4 @@
-# media_player_multi.py（編集ディスプレイ全体キャプチャ対応）
+# media_player_multi.py（エラー対策＋edit_screenが無い場合の安全処理）
 import sys
 import numpy as np
 import os
@@ -10,12 +10,26 @@ from warp_engine import warp_image
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
+MODE_CONFIG_PATH = os.path.join(SETTINGS_DIR, "warp_mode.json")
+
+DEFAULT_DIV = 10
 
 def load_edit_profile():
     if os.path.exists(EDIT_PROFILE_PATH):
         with open(EDIT_PROFILE_PATH, "r") as f:
             return json.load(f).get("display")
     return None
+
+def save_default_points(display_name, screen_size, mode):
+    from init_grids import generate_perimeter_points, generate_perspective_points
+    if mode == "warp_map":
+        points = generate_perimeter_points(screen_size.width(), screen_size.height(), DEFAULT_DIV)
+    else:
+        points = generate_perspective_points(screen_size.width(), screen_size.height())
+
+    json_path = os.path.join(SETTINGS_DIR, f"{display_name}_points.json")
+    with open(json_path, "w") as f:
+        json.dump(points, f)
 
 class ProjectorWindow(QWidget):
     def __init__(self, display_name, screen, edit_screen, window_id, mode="perspective"):
@@ -36,6 +50,11 @@ class ProjectorWindow(QWidget):
         self.setGeometry(self.geometry)
         self.showFullScreen()
 
+        # 自動でモードに応じた初期グリッド生成（なければ）
+        json_path = os.path.join(SETTINGS_DIR, f"{self.display_name}_points.json")
+        if not os.path.exists(json_path):
+            save_default_points(self.display_name, self.geometry.size(), mode)
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)
@@ -43,27 +62,40 @@ class ProjectorWindow(QWidget):
     def update_frame(self):
         img = self.capture_edit_screen()
         if img is None:
+            print(f"[警告] 編集スクリーンのキャプチャに失敗 ({self.display_name})")
             return
+
         corrected = warp_image(img, self.display_name, mode=self.mode)
+        if corrected is None:
+            print(f"[警告] warp_image が None を返しました ({self.display_name})")
+            return
+
         self.display_image(corrected)
 
     def capture_edit_screen(self):
-        if not self.edit_screen:
+        try:
+            if not self.edit_screen:
+                return None
+            pixmap = self.edit_screen.grabWindow(0)
+            image = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
+            width = image.width()
+            height = image.height()
+            ptr = image.bits()
+            ptr.setsize(height * width * 3)
+            arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 3))
+            return arr
+        except Exception as e:
+            print(f"[エラー] 編集画面キャプチャ失敗: {e}")
             return None
-        pixmap = self.edit_screen.grabWindow(0)
-        image = pixmap.toImage().convertToFormat(QImage.Format_RGB888)
-        width = image.width()
-        height = image.height()
-        ptr = image.bits()
-        ptr.setsize(height * width * 3)
-        arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 3))
-        return arr
 
     def display_image(self, frame):
-        h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(frame.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
-        self.label.setPixmap(QPixmap.fromImage(qt_image))
+        try:
+            h, w, ch = frame.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(frame.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+            self.label.setPixmap(QPixmap.fromImage(qt_image))
+        except Exception as e:
+            print(f"[エラー] display_image 失敗: {e}")
 
 
 def main(display_names, mode="perspective"):
@@ -71,6 +103,9 @@ def main(display_names, mode="perspective"):
     screens = QGuiApplication.screens()
     edit_display_name = load_edit_profile()
     edit_screen = next((s for s in screens if s.name() == edit_display_name), None)
+
+    if not edit_screen:
+        print("[エラー] 編集用ディスプレイの認識に失敗しました")
 
     windows = []
     for i, screen in enumerate(screens):

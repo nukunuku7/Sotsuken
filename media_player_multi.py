@@ -1,17 +1,17 @@
-# media_player_multi.py（エラー対策＋edit_screenが無い場合の安全処理）
+# media_player_multi.py（エラー対策＋edit_screenが無い場合の安全処理＋grid_utils連携）
 import sys
-import numpy as np
 import os
 import json
+import numpy as np
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
 from PyQt5.QtGui import QImage, QPixmap, QGuiApplication
 from PyQt5.QtCore import QTimer, Qt
+
 from warp_engine import warp_image
+from grid_utils import generate_perimeter_points, generate_perspective_points  # ここを追加
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
-MODE_CONFIG_PATH = os.path.join(SETTINGS_DIR, "warp_mode.json")
-
 DEFAULT_DIV = 10
 
 def load_edit_profile():
@@ -21,7 +21,6 @@ def load_edit_profile():
     return None
 
 def save_default_points(display_name, screen_size, mode):
-    from init_grids import generate_perimeter_points, generate_perspective_points
     if mode == "warp_map":
         points = generate_perimeter_points(screen_size.width(), screen_size.height(), DEFAULT_DIV)
     else:
@@ -50,7 +49,7 @@ class ProjectorWindow(QWidget):
         self.setGeometry(self.geometry)
         self.showFullScreen()
 
-        # 自動でモードに応じた初期グリッド生成（なければ）
+        # グリッドが未生成なら保存
         json_path = os.path.join(SETTINGS_DIR, f"{self.display_name}_points.json")
         if not os.path.exists(json_path):
             save_default_points(self.display_name, self.geometry.size(), mode)
@@ -82,8 +81,7 @@ class ProjectorWindow(QWidget):
             height = image.height()
             ptr = image.bits()
             ptr.setsize(height * width * 3)
-            arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 3))
-            return arr
+            return np.frombuffer(ptr, np.uint8).reshape((height, width, 3))
         except Exception as e:
             print(f"[エラー] 編集画面キャプチャ失敗: {e}")
             return None
@@ -96,7 +94,6 @@ class ProjectorWindow(QWidget):
             self.label.setPixmap(QPixmap.fromImage(qt_image))
         except Exception as e:
             print(f"[エラー] display_image 失敗: {e}")
-
 
 def main(display_names, mode="perspective"):
     app = QApplication(sys.argv)
@@ -123,7 +120,6 @@ def main(display_names, mode="perspective"):
         sys.exit(1)
 
     sys.exit(app.exec_())
-
 
 if __name__ == "__main__":
     import argparse

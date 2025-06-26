@@ -3,17 +3,14 @@ import argparse
 import tkinter as tk
 import json
 import os
-import re
 from grid_utils import generate_perimeter_points, generate_perspective_points
+from init_grids import sanitize_filename  # 共通化された関数をインポート
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 os.makedirs(SETTINGS_DIR, exist_ok=True)
 
 POINT_RADIUS = 8
 GRID_DIV = 10
-
-def sanitize_filename(name):
-    return re.sub(r'[\\/:*?"<>|]', '_', name)
 
 def get_point_path(display_name):
     return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}_points.json")

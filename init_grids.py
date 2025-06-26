@@ -5,8 +5,7 @@ import re
 import math
 from PyQt5.QtGui import QGuiApplication
 from settings.config.environment_config import environment
-from grid_utils import generate_perimeter_points, generate_perspective_points
-
+from grid_utils import generate_perimeter_points, generate_quad_points, sanitize_filename
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 POINT_SUFFIX = "_points.json"
 

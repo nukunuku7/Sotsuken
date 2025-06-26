@@ -3,23 +3,26 @@ import os
 import json
 import numpy as np
 import cv2
-import re
 
-from grid_utils import generate_perimeter_points, generate_perspective_points  # 共通化
+from grid_utils import (
+    generate_perimeter_points,
+    generate_perspective_points,
+    sanitize_filename,
+    get_point_path
+)
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 POINT_FILE_SUFFIX = "_points.json"
 BLEND_WIDTH_RATIO = 0.1  # 横方向ブレンド率
 
-def sanitize_filename(name):
-    return re.sub(r'[\\/:*?"<>|]', '_', name)
-
 def load_points(display_name):
     path = os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}{POINT_FILE_SUFFIX}")
     if not os.path.exists(path):
+        print(f"[DEBUG] グリッドファイルが存在しません: {path}")
         return None
     with open(path, "r") as f:
         points = json.load(f)
+    print(f"[DEBUG] グリッド読み込み成功: {path} ({len(points)}点)")
     return np.array(points, dtype=np.float32)
 
 def generate_fade_mask(w, h):

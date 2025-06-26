@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
     QLabel, QMessageBox, QComboBox
 )
 from PyQt5.QtGui import QGuiApplication
+from grid_utils import sanitize_filename
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
@@ -83,7 +84,8 @@ class MainWindow(QMainWindow):
             if display_name == self.edit_display_name:
                 continue
             geometry = screen.geometry()
-            launch_grid_editor(display_name, (geometry.x(), geometry.y(), geometry.width(), geometry.height()), mode)
+            sanitized_name = sanitize_filename(display_name)  # 追加
+            launch_grid_editor(sanitized_name, (geometry.x(), geometry.y(), geometry.width(), geometry.height()), mode)
 
     def launch_correction_display(self):
         screens = QGuiApplication.screens()
@@ -96,10 +98,12 @@ class MainWindow(QMainWindow):
 
         mode = self.mode_selector.currentText()
 
+        sanitized_names = list(map(sanitize_filename, display_names))  # 追加
+
         cmd = [
             sys.executable,
             os.path.join(os.path.dirname(__file__), "media_player_multi.py"),
-            "--displays", *display_names,
+            "--displays", *sanitized_names,  # 修正済み
             "--mode", mode
         ]
         subprocess.Popen(cmd)

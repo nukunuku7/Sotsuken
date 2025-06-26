@@ -1,7 +1,41 @@
 # grid_utils.py
 # グリッド初期化や共通ユーティリティ関数を定義
 
+import os
+import re
+import json
 import math
+
+# 設定ディレクトリとファイル拡張子
+SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
+POINT_FILE_SUFFIX = "_points.json"
+os.makedirs(SETTINGS_DIR, exist_ok=True)
+
+# -----------------------------
+# ファイル関連ユーティリティ
+# -----------------------------
+
+def sanitize_filename(name):
+    return re.sub(r'[\\/:*?"<>|]', '_', name)
+
+def get_point_path(display_name):
+    return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}{POINT_FILE_SUFFIX}")
+
+def save_points(display_name, points):
+    path = get_point_path(display_name)
+    with open(path, "w") as f:
+        json.dump(points, f)
+
+def load_points(display_name):
+    path = get_point_path(display_name)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
+
+# -----------------------------
+# グリッド生成系
+# -----------------------------
 
 def generate_perimeter_points(w, h, div=10):
     """
@@ -36,9 +70,13 @@ def generate_quad_points(center, normal, width=0.8, height=0.6):
 
     corners = []
     for dx, dy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
-        px = [center[i] + dx * width/2 * x_axis[i] + dy * height/2 * y_axis[i] for i in range(3)]
+        px = [center[i] + dx * width / 2 * x_axis[i] + dy * height / 2 * y_axis[i] for i in range(3)]
         corners.append(px[:2])
     return corners
+
+# -----------------------------
+# ベクトル演算
+# -----------------------------
 
 def cross(a, b):
     return [

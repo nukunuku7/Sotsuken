@@ -1,6 +1,7 @@
 # media_player_multi.py（エラー対策＋edit_screenが無い場合の安全処理＋grid_utils連携）
 import sys
 import os
+import re
 import json
 import numpy as np
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
@@ -8,11 +9,14 @@ from PyQt5.QtGui import QImage, QPixmap, QGuiApplication
 from PyQt5.QtCore import QTimer, Qt
 
 from warp_engine import warp_image
-from grid_utils import generate_perimeter_points, generate_perspective_points  # ここを追加
+from grid_utils import generate_perimeter_points, generate_perspective_points, sanitize_filename
 
 SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
 EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
 DEFAULT_DIV = 10
+
+def sanitize_filename(name):
+    return re.sub(r'[\\/:*?"<>|]', '_', name)
 
 def load_edit_profile():
     if os.path.exists(EDIT_PROFILE_PATH):
@@ -99,18 +103,21 @@ def main(display_names, mode="perspective"):
     app = QApplication(sys.argv)
     screens = QGuiApplication.screens()
     edit_display_name = load_edit_profile()
-    edit_screen = next((s for s in screens if s.name() == edit_display_name), None)
+    edit_screen = next((s for s in screens if sanitize_filename(s.name()) == sanitize_filename(edit_display_name)), None)
 
     if not edit_screen:
         print("[エラー] 編集用ディスプレイの認識に失敗しました")
 
     windows = []
+    sanitized_display_names = [sanitize_filename(name) for name in display_names]  # 追加
+
     for i, screen in enumerate(screens):
         name = screen.name()
-        if name not in display_names or name == edit_display_name:
+        sanitized_name = sanitize_filename(name)
+        if sanitized_name not in sanitized_display_names or sanitized_name == sanitize_filename(edit_display_name):
             continue
         try:
-            win = ProjectorWindow(name, screen, edit_screen, window_id=i, mode=mode)
+            win = ProjectorWindow(sanitized_name, screen, edit_screen, window_id=i, mode=mode)
             windows.append(win)
         except Exception as e:
             print(f"[Error] {name}: {e}")

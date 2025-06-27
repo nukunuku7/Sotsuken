@@ -134,4 +134,4 @@ environment = {
 
 ## 📄 ライセンス
 
-MIT License
+custom License

@@ -1,22 +1,22 @@
-# main.py（編集用ディスプレイ認識＋モード別初期グリッド生成対応）
+# main.py
+
 import sys
 import os
-import re
 import json
 import subprocess
+import re
+
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
-    QLabel, QMessageBox, QComboBox
+    QLabel, QMessageBox, QComboBox, QListWidget, QListWidgetItem, QCheckBox
 )
 from PyQt5.QtGui import QGuiApplication
+
 from grid_utils import sanitize_filename
 
-SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
+SETTINGS_DIR = "settings"
 EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
 os.makedirs(SETTINGS_DIR, exist_ok=True)
-
-def sanitize_filename(name):
-    return re.sub(r'[\\/:*?"<>|]', '_', name)
 
 def save_edit_profile(display_name):
     with open(EDIT_PROFILE_PATH, "w") as f:
@@ -28,39 +28,35 @@ def load_edit_profile():
             return json.load(f).get("display")
     return None
 
-def launch_grid_editor(display_name, geometry, mode):
-    x, y, w, h = geometry
-    cmd = [
-        sys.executable,
-        os.path.join(os.path.dirname(__file__), "grid_editor.py"),
-        "--mode", mode,
-        "--display", display_name,
-        "--x", str(x), "--y", str(y),
-        "--w", str(w), "--h", str(h)
-    ]
-    subprocess.Popen(cmd)
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("プロジェクター歪み補正アプリ")
-        self.setGeometry(200, 200, 420, 300)
+        self.setWindowTitle("360°歪み補正プロジェクションシステム")
+        self.setGeometry(200, 200, 480, 400)
 
         layout = QVBoxLayout()
 
         self.label = QLabel("編集用ディスプレイ：未認識")
         layout.addWidget(self.label)
 
+        # 補正方式選択（射影変換 or 自由変形）
         self.mode_selector = QComboBox()
         self.mode_selector.addItems(["perspective", "warp_map"])
         layout.addWidget(QLabel("補正方式を選択："))
         layout.addWidget(self.mode_selector)
 
-        self.auto_edit_button = QPushButton("プロジェクター全台グリッド編集")
-        self.auto_edit_button.clicked.connect(self.auto_launch_editors)
-        layout.addWidget(self.auto_edit_button)
+        # プロジェクター選択リスト
+        self.projector_list = QListWidget()
+        layout.addWidget(QLabel("補正出力先ディスプレイを選択："))
+        layout.addWidget(self.projector_list)
 
-        self.launch_button = QPushButton("補正表示起動（出力反映）")
+        # 編集ボタン
+        self.edit_button = QPushButton("グリッドエディター起動")
+        self.edit_button.clicked.connect(self.launch_editors)
+        layout.addWidget(self.edit_button)
+
+        # 表示反映ボタン
+        self.launch_button = QPushButton("補正表示 起動（出力反映）")
         self.launch_button.clicked.connect(self.launch_correction_display)
         layout.addWidget(self.launch_button)
 
@@ -68,47 +64,68 @@ class MainWindow(QMainWindow):
         central_widget.setLayout(layout)
         self.setCentralWidget(central_widget)
 
+        self.edit_display_name = ""
         self.init_display_info()
+        self.init_projector_list()
 
     def init_display_info(self):
         screen = QGuiApplication.primaryScreen()
         self.edit_display_name = screen.name()
-        save_edit_profile(self.edit_display_name)
         self.label.setText(f"編集用ディスプレイ：{self.edit_display_name}")
+        save_edit_profile(self.edit_display_name)
 
-    def auto_launch_editors(self):
+    def init_projector_list(self):
         screens = QGuiApplication.screens()
-        mode = self.mode_selector.currentText()
         for screen in screens:
-            display_name = screen.name()
-            if display_name == self.edit_display_name:
+            if screen.name() == self.edit_display_name:
                 continue
-            geometry = screen.geometry()
-            sanitized_name = sanitize_filename(display_name)  # 追加
-            launch_grid_editor(sanitized_name, (geometry.x(), geometry.y(), geometry.width(), geometry.height()), mode)
+            item = QListWidgetItem(screen.name())
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self.projector_list.addItem(item)
+
+    def launch_editors(self):
+        mode = self.mode_selector.currentText()
+        script = "grid_editor_perspective.py" if mode == "perspective" else "grid_editor_warpmap.py"
+
+        screens = QGuiApplication.screens()
+        for screen in screens:
+            if screen.name() == self.edit_display_name:
+                continue
+            geom = screen.geometry()
+            cmd = [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), script),
+                "--mode", mode,
+                "--display", screen.name(),
+                "--x", str(geom.x()), "--y", str(geom.y()),
+                "--w", str(geom.width()), "--h", str(geom.height())
+            ]
+            subprocess.Popen(cmd)
 
     def launch_correction_display(self):
-        screens = QGuiApplication.screens()
-        secondary_screens = [s for s in screens if s.name() != self.edit_display_name]
-        display_names = [s.name() for s in secondary_screens]
+        selected_names = []
+        for i in range(self.projector_list.count()):
+            item = self.projector_list.item(i)
+            if item.checkState():
+                selected_names.append(item.text())
 
-        if not display_names:
-            QMessageBox.warning(self, "警告", "表示可能なプロジェクターが見つかりません")
+        if not selected_names:
+            QMessageBox.warning(self, "警告", "出力先ディスプレイが選択されていません")
             return
 
         mode = self.mode_selector.currentText()
-
-        sanitized_names = list(map(sanitize_filename, display_names))  # 追加
-
         cmd = [
             sys.executable,
             os.path.join(os.path.dirname(__file__), "media_player_multi.py"),
-            "--displays", *sanitized_names,  # 修正済み
+            "--displays", *selected_names,
             "--mode", mode
         ]
         subprocess.Popen(cmd)
 
 if __name__ == "__main__":
+    from PyQt5.QtCore import Qt
+
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()

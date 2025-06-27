@@ -1,22 +1,20 @@
-# warp_engine.py（grid_utils統合＆安全性向上）
+# warp_engine.py
+
 import os
 import json
 import numpy as np
 import cv2
+from grid_utils import sanitize_filename
 
-from grid_utils import (
-    generate_perimeter_points,
-    generate_perspective_points,
-    sanitize_filename,
-    get_point_path
-)
+SETTINGS_DIR = "settings"
+BLEND_WIDTH_RATIO = 0.1
 
-SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
-POINT_FILE_SUFFIX = "_points.json"
-BLEND_WIDTH_RATIO = 0.1  # 横方向ブレンド率
+def get_points_path(display_name, mode):
+    safe_name = sanitize_filename(display_name)
+    return os.path.join(SETTINGS_DIR, f"{safe_name}_{mode}_points.json")
 
-def load_points(display_name):
-    path = os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}{POINT_FILE_SUFFIX}")
+def load_points(display_name, mode):
+    path = get_points_path(display_name, mode)
     if not os.path.exists(path):
         print(f"[DEBUG] グリッドファイルが存在しません: {path}")
         return None
@@ -48,7 +46,7 @@ def warp_image(image, display_name="default", mode="perspective"):
         return None
 
     h, w = image.shape[:2]
-    points = load_points(display_name)
+    points = load_points(display_name, mode)
     if points is None or len(points) < 4:
         print(f"[警告] 補正ポイントが不足しているためスキップします ({display_name})")
         return image
@@ -60,21 +58,15 @@ def warp_image(image, display_name="default", mode="perspective"):
                                          borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
 
         elif mode == "warp_map":
-            # マスク作成
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.fillPoly(mask, [points.astype(np.int32)], 255)
-
-            # remap用座標マップ（マスク外は無効領域）
             map_x = np.full((h, w), -1, dtype=np.float32)
             map_y = np.full((h, w), -1, dtype=np.float32)
             ys, xs = np.where(mask == 255)
             map_x[ys, xs] = xs
             map_y[ys, xs] = ys
-
-            # 範囲外防止（OpenCV remap の仕様上、範囲内に収める）
             map_x = np.clip(map_x, 0, w - 1)
             map_y = np.clip(map_y, 0, h - 1)
-
             warped = cv2.remap(image, map_x, map_y,
                                interpolation=cv2.INTER_LINEAR,
                                borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
@@ -82,7 +74,7 @@ def warp_image(image, display_name="default", mode="perspective"):
             print(f"[警告] 未知の補正モードです: {mode}")
             return image
 
-        # アルファブレンディング（左右端のフェード）
+        # アルファブレンド
         fade_mask = generate_fade_mask(w, h)
         for c in range(3):
             warped[:, :, c] = (warped[:, :, c].astype(np.float32) * fade_mask).astype(np.uint8)

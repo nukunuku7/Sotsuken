@@ -74,11 +74,17 @@ def main():
     root.title(f"{args.display} - 自由変形モード")
     root.geometry(f"{args.w}x{args.h}+{args.x}+{args.y}")
 
-    canvas = EditorCanvas(root, args.display, args.w, args.h)
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill="both", expand=True)
+
+    canvas = EditorCanvas(main_frame, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
 
-    save_button = tk.Button(root, text="保存", command=canvas.save)
-    save_button.pack(side="bottom")
+    button_frame = tk.Frame(root)
+    button_frame.pack(fill="x")
+
+    save_button = tk.Button(button_frame, text="保存", command=canvas.save)
+    save_button.pack(side="bottom", pady=5)
 
     root.mainloop()
 

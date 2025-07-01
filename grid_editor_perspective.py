@@ -1,16 +1,41 @@
-# grid_editor_perspective.py（修正済み - grid_utils統合対応）
+# grid_editor_perspective.py（保存ボタン削除・操作ガイド依存）
 
 import argparse
 import tkinter as tk
 import json
 import os
-from grid_utils import generate_perspective_points, sanitize_filename, save_points
+from grid_utils import (
+    generate_perspective_points, sanitize_filename, save_points,
+    generate_quad_points, load_edit_profile
+)
+from settings.config.environment_config import environment
+from PyQt5.QtGui import QGuiApplication
 
 SETTINGS_DIR = "settings"
 POINT_RADIUS = 8
 
 def get_point_path(display_name):
     return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}_perspective_points.json")
+
+def get_screen_index(display_name):
+    screens = QGuiApplication.screens()
+    edit_display = load_edit_profile()
+    active_screens = [s for s in screens if s.name() != edit_display]
+    for idx, screen in enumerate(active_screens):
+        if screen.name() == display_name:
+            return idx
+    return None
+
+def get_environment_grid(display_name, w, h):
+    index = get_screen_index(display_name)
+    if index is None or index >= len(environment["screens"]):
+        return generate_perspective_points(w, h)
+    screen_def = environment["screens"][index]
+    quad = generate_quad_points(
+        screen_def["center"], screen_def["normal"],
+        width=screen_def.get("width", 1.2), height=screen_def.get("height", 0.9)
+    )
+    return [[(x + 1) * w / 2, (y + 1) * h / 2] for x, y in quad]
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
@@ -51,11 +76,7 @@ class EditorCanvas(tk.Canvas):
         if os.path.exists(path):
             with open(path, "r") as f:
                 return json.load(f)
-        return generate_perspective_points(self.w, self.h)
-
-    def save(self):
-        save_points(self.display_name, self.points, mode="perspective")
-        print(f"✅ 保存: {get_point_path(self.display_name)}")
+        return get_environment_grid(self.display_name, self.w, self.h)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -76,12 +97,6 @@ def main():
 
     canvas = EditorCanvas(main_frame, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
-
-    button_frame = tk.Frame(root)
-    button_frame.pack(fill="x")
-
-    save_button = tk.Button(button_frame, text="保存", command=canvas.save)
-    save_button.pack(side="bottom", pady=5)
 
     root.mainloop()
 

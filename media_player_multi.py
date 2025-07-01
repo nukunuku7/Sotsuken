@@ -1,4 +1,4 @@
-# media_player_multi.py（修正済み - モード対応・複数ディスプレイ補正対応）
+# media_player_multi.py（修正済み：warp_info を初期化時に一度だけ作成）
 
 import sys
 import argparse
@@ -8,8 +8,7 @@ from PyQt5.QtWidgets import QApplication, QLabel, QWidget
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QGuiApplication
-from grid_utils import load_points, sanitize_filename
-from warp_engine import warp_image
+from warp_engine import warp_image, prepare_warp
 
 class DisplayWindow(QWidget):
     def __init__(self, screen, mode):
@@ -26,24 +25,24 @@ class DisplayWindow(QWidget):
         self.label = QLabel(self)
         self.label.setGeometry(0, 0, geom.width(), geom.height())
 
+        self.blank_image = np.zeros((geom.height(), geom.width(), 3), dtype=np.uint8)
+        self.warp_info = prepare_warp(self.display_name, self.mode, (geom.height(), geom.width()))
+
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)
 
-        self.blank_image = np.zeros((geom.height(), geom.width(), 3), dtype=np.uint8)
         self.showFullScreen()
 
     def update_frame(self):
-        # ダミー画像：真ん中に白い円
         img = self.blank_image.copy()
         cv2.circle(img, (img.shape[1] // 2, img.shape[0] // 2), 100, (255, 255, 255), -1)
 
-        warped = warp_image(img, display_name=self.display_name, mode=self.mode)
+        warped = warp_image(img, warp_info=self.warp_info)
         h, w, ch = warped.shape
         bytes_per_line = ch * w
         qt_image = QImage(warped.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
         self.label.setPixmap(QPixmap.fromImage(qt_image))
-
 
 def main():
     parser = argparse.ArgumentParser()

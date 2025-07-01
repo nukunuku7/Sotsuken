@@ -1,88 +1,65 @@
-# media_player_multi.py（PC全体を補正し各ディスプレイに分配表示）
+# media_player_multi.py（修正済み：warp_info を初期化時に一度だけ作成）
+
 import sys
+import argparse
+import cv2
 import numpy as np
-import mss
-import os
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
+from PyQt5.QtWidgets import QApplication, QLabel, QWidget
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, Qt
-from warp_engine import warp_image
+from PyQt5.QtGui import QGuiApplication
+from warp_engine import warp_image, prepare_warp
 
-SETTINGS_DIR = "C:/Users/vrlab/.vscode/nukunuku/Sotsuken/settings"
-
-class ProjectorWindow(QWidget):
-    def __init__(self, display_index=0, display_name="Display", window_id=None):
+class DisplayWindow(QWidget):
+    def __init__(self, screen, mode):
         super().__init__()
-        self.setWindowTitle(f"Projector {window_id}")
+        self.setWindowFlag(Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
+        self.display_name = screen.name()
+        self.mode = mode
+
+        geom = screen.geometry()
+        self.setGeometry(geom)
         self.label = QLabel(self)
-        self.label.setAlignment(Qt.AlignCenter)
-        layout = QVBoxLayout()
-        layout.addWidget(self.label)
-        self.setLayout(layout)
+        self.label.setGeometry(0, 0, geom.width(), geom.height())
 
-        self.display_name = display_name
-        self.display_index = display_index
-        self.sct = mss.mss()
+        self.blank_image = np.zeros((geom.height(), geom.width(), 3), dtype=np.uint8)
+        self.warp_info = prepare_warp(self.display_name, self.mode, (geom.height(), geom.width()))
 
-        screens = QApplication.screens()
-        if display_index >= len(screens):
-            raise RuntimeError(f"ディスプレイ index={display_index} が存在しません")
-
-        self.geometry_rect = screens[display_index].geometry()
-        self.setGeometry(self.geometry_rect)
-        self.showFullScreen()
-
-        self.timer = QTimer(self)
+        self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)
 
+        self.showFullScreen()
+
     def update_frame(self):
-        full_img = self.capture_desktop()
-        if full_img is None:
-            return
-        cropped = self.crop_to_screen(full_img)
-        corrected = warp_image(cropped, self.display_name)
-        self.display_image(corrected)
+        img = self.blank_image.copy()
+        cv2.circle(img, (img.shape[1] // 2, img.shape[0] // 2), 100, (255, 255, 255), -1)
 
-    def capture_desktop(self):
-        monitor = self.sct.monitors[0]  # 全デスクトップ
-        img = np.array(self.sct.grab(monitor))[:, :, :3]
-        return img
-
-    def crop_to_screen(self, full_img):
-        gx, gy, gw, gh = self.geometry_rect.x(), self.geometry_rect.y(), self.geometry_rect.width(), self.geometry_rect.height()
-        return full_img[gy:gy+gh, gx:gx+gw]
-
-    def display_image(self, frame):
-        h, w, ch = frame.shape
+        warped = warp_image(img, warp_info=self.warp_info)
+        h, w, ch = warped.shape
         bytes_per_line = ch * w
-        qt_image = QImage(frame.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+        qt_image = QImage(warped.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
         self.label.setPixmap(QPixmap.fromImage(qt_image))
 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--displays", nargs='+', required=True, help="出力対象のディスプレイ名")
+    parser.add_argument("--mode", choices=["perspective", "warp_map"], default="perspective")
+    args = parser.parse_args()
 
-def main(display_names):
     app = QApplication(sys.argv)
-    screens = QApplication.screens()
+    screens = QGuiApplication.screens()
     windows = []
 
-    for i, name in enumerate(display_names):
-        try:
-            win = ProjectorWindow(display_index=i, display_name=name, window_id=i)
-            windows.append(win)
-        except Exception as e:
-            print(f"[Error] Display {i}: {e}")
-
-    if not windows:
-        print("エラー: 有効なウィンドウがありません")
-        sys.exit(1)
+    for screen in screens:
+        if screen.name() in args.displays:
+            window = DisplayWindow(screen, mode=args.mode)
+            windows.append(window)
 
     sys.exit(app.exec_())
 
-
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="全画面補正ビューア（分配方式）")
-    parser.add_argument("--displays", nargs="+", required=True, help="各補正対象のディスプレイ名")
-    args = parser.parse_args()
-
-    main(args.displays)
+    main()

@@ -235,13 +235,17 @@ stream = sd.InputStream(
 stream.start()
 
 # ==== 周波数ビン作成 ====
-def create_custom_log_bins(sr, n_bars, linear_cutoff=300, linear_ratio=0.2, min_freq=30):
+def create_custom_log_bins(sr, n_bars, linear_cutoff=1200, linear_ratio=0.4, min_freq=20):
     linear_bins = int(n_bars * linear_ratio)
     log_bins_count = n_bars - linear_bins
-    linear_edges = np.linspace(min_freq, linear_cutoff, linear_bins + 1)
-    log_edges = np.logspace(np.log10(linear_cutoff), np.log10(sr / 2), log_bins_count + 1)
-    return np.concatenate((linear_edges, log_edges[1:]))
 
+    linear_edges = np.linspace(min_freq, linear_cutoff, linear_bins + 1, endpoint=True)
+    log_edges = np.logspace(np.log10(linear_cutoff), np.log10(sr / 2), log_bins_count + 1, endpoint=True)
+
+    # 🔽 重複回避：linearの最後を除き、logは全て使用
+    return np.concatenate((linear_edges[:-1], log_edges))
+
+# ==== ログビン生成 ====
 log_bins = create_custom_log_bins(SR, N_BARS)
 
 # ==== スペクトル計算 ====
@@ -250,22 +254,29 @@ def get_freq_spectrum(audio, log_bins):
     fft = np.abs(np.fft.rfft(windowed))
     freqs = np.fft.rfftfreq(len(audio), 1 / SR)
     bar_heights = np.zeros(N_BARS)
-    THRESHOLD_DB = -60
+    THRESHOLD_DB = -80
     BASE_GAIN_DB = 40
 
     for i in range(N_BARS):
         mask = (freqs >= log_bins[i]) & (freqs < log_bins[i + 1])
-        if np.any(mask):
-            power = np.mean(fft[mask])
-            db = 20 * np.log10(power + 1e-6)
-            freq_center = (log_bins[i] + log_bins[i + 1]) / 2
-            gain_adjust_db = np.interp(np.log10(freq_center), [np.log10(log_bins[0]), np.log10(log_bins[-1])], [0, -20])
-            total_gain = BASE_GAIN_DB + gain_adjust_db
-            if db < THRESHOLD_DB:
-                bar_heights[i] = 0
-            else:
-                norm = ((db - total_gain) - THRESHOLD_DB) / (-THRESHOLD_DB)
-                bar_heights[i] = np.clip(norm**2.0, 0, 1)
+        # 🔽 maskが空のときでも無視せず、最小パワーで処理する
+        power = np.mean(fft[mask]) if np.any(mask) else 1e-6
+        db = 20 * np.log10(power + 1e-6)
+
+        freq_center = (log_bins[i] + log_bins[i + 1]) / 2
+        gain_adjust_db = np.interp(
+            np.log10(freq_center),
+            [np.log10(log_bins[0]), np.log10(log_bins[-1])],
+            [0, -40]
+        )
+        total_gain = BASE_GAIN_DB + gain_adjust_db
+
+        if db < THRESHOLD_DB:
+            power = np.mean(fft[mask]) if np.any(mask) else 1e-6
+        else:
+            norm = ((db - total_gain) - THRESHOLD_DB) / (-THRESHOLD_DB)
+            bar_heights[i] = np.clip(norm**2.0, 0, 1)
+
     return bar_heights
 
 # ==== メインループ ====

@@ -7,28 +7,109 @@ import os
 import time
 from ctypes import Structure, windll, byref, c_long
 
+# ==== ウィンドウサイズ ====
+WIDTH, HEIGHT = 800, 600
+
+# ==== スクロールオフセット ====
+scroll_offset_input = 0
+scroll_offset_output = 0
+scroll_speed = 20  # スクロールの速さ
+
+# ==== デバイスインデックス ====
+selected_inputs = []
+selected_outputs = []
+
+# ==== タイマー制御変数 ====
+selection_complete_time = None
+SELECTION_DELAY_SEC = 3
+
 # ==== デバイス取得 ====
 def list_devices(kind='input'):
     return [d for d in sd.query_devices() if (d['max_input_channels'] if kind == 'input' else d['max_output_channels']) > 0]
 
 input_devices = list_devices('input')
 output_devices = list_devices('output')
-selected_inputs = []
-selected_outputs = []
 
-scroll_offset_input = 0
-scroll_offset_output = 0
-scroll_speed = 20  # スクロールの速さ
+# ==== デバイス情報取得 ====
+input_info1 = input_devices[selected_inputs[0]]
+input_info2 = input_devices[selected_inputs[1]]
+INPUT_DEVICE_INDEX = input_info1['index']
+SR = int(input_info1['default_samplerate'])
+
+# ==== デバイス監視スレッド ====
+def monitor_devices():
+    global input_devices, output_devices
+    while True:
+        time.sleep(1)
+        input_devices = list_devices('input')
+        output_devices = list_devices('output')
+
+threading.Thread(target=monitor_devices, daemon=True).start()
+
+# ==== 透過ウィンドウ用 ====
+class RECT(Structure):
+    _fields_ = [
+        ("left", c_long),
+        ("top", c_long),
+        ("right", c_long),
+        ("bottom", c_long)
+    ]
+
+class MONITORINFO(Structure):
+    _fields_ = [
+        ('cbSize', ctypes.c_ulong),
+        ('rcMonitor', RECT),
+        ('rcWork', RECT),
+        ('dwFlags', ctypes.c_ulong)
+    ]
+
+def get_monitor_work_area(hwnd):
+    monitor = windll.user32.MonitorFromWindow(hwnd, 2)
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    windll.user32.GetMonitorInfoW(monitor, byref(info))
+    rc_work = info.rcWork
+    rc_monitor = info.rcMonitor
+    return (
+        rc_work.left, rc_work.top,
+        rc_work.right, rc_work.bottom,
+        rc_monitor.left, rc_monitor.top,
+        rc_monitor.right, rc_monitor.bottom
+    )
+
+# ==== 表示ウィンドウ（透明） ====
+pygame.display.init()
+temp_screen = pygame.display.set_mode((100, 100))
+hwnd = pygame.display.get_wm_info()["window"]
+left, top, right, bottom, *_ = get_monitor_work_area(hwnd)
+pygame.display.quit()
+
+VISUALIZER_HEIGHT = 200
+SCREEN_WIDTH = right - left
+WINDOW_Y = bottom - VISUALIZER_HEIGHT
+os.environ['SDL_VIDEO_WINDOW_POS'] = f'{left},{WINDOW_Y}'
+screen = pygame.display.set_mode((SCREEN_WIDTH, VISUALIZER_HEIGHT), pygame.NOFRAME)
+pygame.display.set_caption("Visualizer")
+hwnd = pygame.display.get_wm_info()["window"]
+extended_style = windll.user32.GetWindowLongW(hwnd, -20)
+windll.user32.SetWindowLongW(hwnd, -20, extended_style | 0x80000)
+windll.user32.SetLayeredWindowAttributes(hwnd, 0x000000, 0, 0x1)
+
+# ==== ビジュアライザー用パラメータ ====
+BLOCK_SIZE = 2048
+N_BARS = 128
+BAR_HEIGHT = 200
+BAR_WIDTH = screen.get_width() // N_BARS
+buffer = np.zeros(BLOCK_SIZE, dtype=np.float32)
+clock = pygame.time.Clock()
 
 # ==== Pygame 初期化 ====
 pygame.init()
-WIDTH, HEIGHT = 800, 600
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("デバイス選択")
 font = pygame.font.SysFont("meiryo", 18)  # UTF-8対応フォント（Windows日本語環境向け）
 
-
-# ==== デバイス選択 UI 描画 ====
+# ==== デバイス選択 UI ====
 def draw_device_selection():
     screen.fill((30, 30, 30))
     title = font.render("録音（入力）デバイスを2つ選択 / 再生（出力）デバイスを2つ選択", True, (255, 255, 255))
@@ -53,6 +134,41 @@ def draw_device_selection():
             screen.blit(label, (60, y + 5))
 
     pygame.display.flip()
+
+# ==== UI 選択ループ ====
+ui_running = True
+while ui_running:
+    draw_device_selection()
+
+    # タイマー起動後に3秒経ったらUI終了
+    if selection_complete_time:
+        if time.time() - selection_complete_time > SELECTION_DELAY_SEC:
+            ui_running = False
+    
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            exit()
+            
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            mx, my = pygame.mouse.get_pos()
+            for i in range(len(input_devices)):
+                if 50 <= mx <= 750 and 60 + i * 35 <= my <= 90 + i * 35:
+                    if i in selected_inputs:
+                        selected_inputs.remove(i)
+                    elif len(selected_inputs) < 2:
+                        selected_inputs.append(i)
+            for j in range(len(output_devices)):
+                if 50 <= mx <= 750 and 320 + j * 35 <= my <= 350 + j * 35:
+                    if j in selected_outputs:
+                        selected_outputs.remove(j)
+                    elif len(selected_outputs) < 2:
+                        selected_outputs.append(j)
+
+    if len(selected_inputs) == 2 and len(selected_outputs) == 2:
+        ui_running = False
+
+pygame.display.quit()# UI非表示化
 
 # ==== スクロール処理 ====
 for event in pygame.event.get():
@@ -107,133 +223,6 @@ for event in pygame.event.get():
         elif event.key == pygame.K_s:
             scroll_offset_output += scroll_speed
 
-# ==== デバイス監視スレッド ====
-def monitor_devices():
-    global input_devices, output_devices
-    while True:
-        time.sleep(1)
-        input_devices = list_devices('input')
-        output_devices = list_devices('output')
-
-threading.Thread(target=monitor_devices, daemon=True).start()
-
-# === タイマー制御変数 ===
-selection_complete_time = None
-SELECTION_DELAY_SEC = 3
-
-# ==== UI 選択ループ ====
-ui_running = True
-while ui_running:
-    draw_device_selection()
-
-    # タイマー起動後に3秒経ったらUI終了
-    if selection_complete_time:
-        if time.time() - selection_complete_time > SELECTION_DELAY_SEC:
-            ui_running = False
-    
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            exit()
-            
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            mx, my = pygame.mouse.get_pos()
-            for i in range(len(input_devices)):
-                if 50 <= mx <= 750 and 60 + i * 35 <= my <= 90 + i * 35:
-                    if i in selected_inputs:
-                        selected_inputs.remove(i)
-                    elif len(selected_inputs) < 2:
-                        selected_inputs.append(i)
-            for j in range(len(output_devices)):
-                if 50 <= mx <= 750 and 320 + j * 35 <= my <= 350 + j * 35:
-                    if j in selected_outputs:
-                        selected_outputs.remove(j)
-                    elif len(selected_outputs) < 2:
-                        selected_outputs.append(j)
-
-    if len(selected_inputs) == 2 and len(selected_outputs) == 2:
-        ui_running = False
-
-pygame.display.quit()# UI非表示化
-
-# ==== デバイス情報取得 ====
-input_info1 = input_devices[selected_inputs[0]]
-input_info2 = input_devices[selected_inputs[1]]
-INPUT_DEVICE_INDEX = input_info1['index']
-SR = int(input_info1['default_samplerate'])
-
-# ==== 透過ウィンドウ用 ====
-class RECT(Structure):
-    _fields_ = [
-        ("left", c_long),
-        ("top", c_long),
-        ("right", c_long),
-        ("bottom", c_long)
-    ]
-
-class MONITORINFO(Structure):
-    _fields_ = [
-        ('cbSize', ctypes.c_ulong),
-        ('rcMonitor', RECT),
-        ('rcWork', RECT),
-        ('dwFlags', ctypes.c_ulong)
-    ]
-
-def get_monitor_work_area(hwnd):
-    monitor = windll.user32.MonitorFromWindow(hwnd, 2)
-    info = MONITORINFO()
-    info.cbSize = ctypes.sizeof(MONITORINFO)
-    windll.user32.GetMonitorInfoW(monitor, byref(info))
-    rc_work = info.rcWork
-    rc_monitor = info.rcMonitor
-    return (
-        rc_work.left, rc_work.top,
-        rc_work.right, rc_work.bottom,
-        rc_monitor.left, rc_monitor.top,
-        rc_monitor.right, rc_monitor.bottom
-    )
-
-# ==== 表示ウィンドウ（透明） ====
-pygame.display.init()
-temp_screen = pygame.display.set_mode((100, 100))
-hwnd = pygame.display.get_wm_info()["window"]
-left, top, right, bottom, *_ = get_monitor_work_area(hwnd)
-pygame.display.quit()
-
-VISUALIZER_HEIGHT = 200
-SCREEN_WIDTH = right - left
-WINDOW_Y = bottom - VISUALIZER_HEIGHT
-os.environ['SDL_VIDEO_WINDOW_POS'] = f'{left},{WINDOW_Y}'
-screen = pygame.display.set_mode((SCREEN_WIDTH, VISUALIZER_HEIGHT), pygame.NOFRAME)
-pygame.display.set_caption("Visualizer")
-hwnd = pygame.display.get_wm_info()["window"]
-extended_style = windll.user32.GetWindowLongW(hwnd, -20)
-windll.user32.SetWindowLongW(hwnd, -20, extended_style | 0x80000)
-windll.user32.SetLayeredWindowAttributes(hwnd, 0x000000, 0, 0x1)
-
-# ==== ビジュアライザー用パラメータ ====
-BLOCK_SIZE = 2048
-N_BARS = 128
-BAR_HEIGHT = 120
-BAR_WIDTH = screen.get_width() // N_BARS
-buffer = np.zeros(BLOCK_SIZE, dtype=np.float32)
-clock = pygame.time.Clock()
-
-# ==== 録音処理 ====
-def audio_callback(indata, frames, time_info, status):
-    global buffer
-    buffer = indata[:, 0]
-
-stream = sd.InputStream(
-    samplerate=SR,
-    blocksize=BLOCK_SIZE,
-    device=INPUT_DEVICE_INDEX,
-    channels=1,
-    dtype='float32',
-    callback=audio_callback
-)
-stream.start()
-
 # ==== 周波数ビン作成 ====
 def create_custom_log_bins(sr, n_bars, linear_cutoff=1200, linear_ratio=0.4, min_freq=20):
     linear_bins = int(n_bars * linear_ratio)
@@ -278,6 +267,21 @@ def get_freq_spectrum(audio, log_bins):
             bar_heights[i] = np.clip(norm**2.0, 0, 1)
 
     return bar_heights
+
+# ==== 録音処理 ====
+def audio_callback(indata, frames, time_info, status):
+    global buffer
+    buffer = indata[:, 0]
+
+stream = sd.InputStream(
+    samplerate=SR,
+    blocksize=BLOCK_SIZE,
+    device=INPUT_DEVICE_INDEX,
+    channels=1,
+    dtype='float32',
+    callback=audio_callback
+)
+stream.start()
 
 # ==== メインループ ====
 running = True

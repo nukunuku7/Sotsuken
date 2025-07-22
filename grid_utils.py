@@ -87,16 +87,20 @@ def generate_quad_points(center, normal, width=1.2, height=0.9):
 
 def auto_generate_from_environment(mode="perspective"):
     """
-    environment_config.py に基づいて各画面に初期グリッドを生成・保存
+    environment_config.py に基づいて各画面に初期グリッドを生成・保存（接続状況に応じて調整）
     """
     app = QGuiApplication.instance() or QGuiApplication([])
     screens = QGuiApplication.screens()
     edit_display = load_edit_profile()
     screen_map = {i: s for i, s in enumerate(screens) if s.name() != edit_display}
 
-    screen_defs = environment["screens"]
-    if len(screen_defs) > len(screen_map):
-        print("[警告] スクリーン数が接続ディスプレイより多いです")
+    screen_defs_all = environment["screens"]
+    screen_defs = screen_defs_all[:len(screen_map)]  # 実際の接続数に合わせて切り取る
+
+    if len(screen_defs_all) > len(screen_map):
+        print("[警告] 定義されたスクリーン数が接続ディスプレイより多いため、一部は省略されます。")
+    elif len(screen_defs_all) < len(screen_map):
+        print("[警告] 接続ディスプレイの数が定義より多いため、余剰ディスプレイは無視されます。")
 
     for (i, screen), screen_def in zip(screen_map.items(), screen_defs):
         name = screen.name()
@@ -118,6 +122,7 @@ def auto_generate_from_environment(mode="perspective"):
         print(f"✔ グリッド生成: {name} → {len(points)}点（モード: {mode}）")
 
     print("🎉 全ディスプレイのグリッド生成完了")
+
 
 # -----------------------------
 # ベクトル演算

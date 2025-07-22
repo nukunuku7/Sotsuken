@@ -1,4 +1,4 @@
-# warp_engine.py
+# warp_engine.py（初回のみ補正マップ作成、以降は再利用）
 
 import os
 import json
@@ -8,6 +8,8 @@ from grid_utils import sanitize_filename
 
 SETTINGS_DIR = "settings"
 BLEND_WIDTH_RATIO = 0.1
+
+warp_cache = {}  # display_name → precomputed data
 
 def get_points_path(display_name, mode):
     safe_name = sanitize_filename(display_name)
@@ -40,47 +42,56 @@ def generate_perspective_matrix(src_size, dst_points):
     dst_pts = np.array(dst_points, dtype=np.float32)
     return cv2.getPerspectiveTransform(src_pts, dst_pts)
 
-def warp_image(image, display_name="default", mode="perspective"):
-    if image is None:
-        print(f"[エラー] 入力画像がNoneです ({display_name})")
-        return None
-
-    h, w = image.shape[:2]
+def prepare_warp(display_name, mode, src_size):
     points = load_points(display_name, mode)
     if points is None or len(points) < 4:
-        print(f"[警告] 補正ポイントが不足しているためスキップします ({display_name})")
+        return None
+
+    h, w = src_size
+    if mode == "perspective":
+        matrix = generate_perspective_matrix((h, w), points[:4])
+        fade = generate_fade_mask(w, h)
+        return {"mode": mode, "matrix": matrix, "fade": fade}
+
+    elif mode == "warp_map":
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(mask, [points.astype(np.int32)], 255)
+        map_x = np.full((h, w), -1, dtype=np.float32)
+        map_y = np.full((h, w), -1, dtype=np.float32)
+        ys, xs = np.where(mask == 255)
+        map_x[ys, xs] = xs
+        map_y[ys, xs] = ys
+        map_x = np.clip(map_x, 0, w - 1)
+        map_y = np.clip(map_y, 0, h - 1)
+        fade = generate_fade_mask(w, h)
+        return {"mode": mode, "map_x": map_x, "map_y": map_y, "fade": fade}
+
+    else:
+        print(f"[警告] 未知の補正モードです: {mode}")
+        return None
+
+def warp_image(image, warp_info):
+    if image is None or warp_info is None:
         return image
 
+    h, w = image.shape[:2]
     try:
-        if mode == "perspective":
-            matrix = generate_perspective_matrix((h, w), points[:4])
+        if warp_info["mode"] == "perspective":
+            matrix = warp_info["matrix"]
             warped = cv2.warpPerspective(image, matrix, (w, h),
                                          borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
 
-        elif mode == "warp_map":
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.fillPoly(mask, [points.astype(np.int32)], 255)
-            map_x = np.full((h, w), -1, dtype=np.float32)
-            map_y = np.full((h, w), -1, dtype=np.float32)
-            ys, xs = np.where(mask == 255)
-            map_x[ys, xs] = xs
-            map_y[ys, xs] = ys
-            map_x = np.clip(map_x, 0, w - 1)
-            map_y = np.clip(map_y, 0, h - 1)
-            warped = cv2.remap(image, map_x, map_y,
+        elif warp_info["mode"] == "warp_map":
+            warped = cv2.remap(image, warp_info["map_x"], warp_info["map_y"],
                                interpolation=cv2.INTER_LINEAR,
                                borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
-        else:
-            print(f"[警告] 未知の補正モードです: {mode}")
-            return image
 
-        # アルファブレンド
-        fade_mask = generate_fade_mask(w, h)
+        fade_mask = warp_info["fade"]
         for c in range(3):
             warped[:, :, c] = (warped[:, :, c].astype(np.float32) * fade_mask).astype(np.uint8)
 
         return warped
 
     except Exception as e:
-        print(f"[エラー] warp_image失敗 ({display_name}): {e}")
+        print(f"[エラー] warp_image失敗: {e}")
         return image

@@ -1,10 +1,15 @@
-# grid_editor_warpmap.py（修正済み - grid_utils統合対応）
+# grid_editor_warpmap.py（環境設定ベースの初期グリッド対応）
 
 import argparse
 import tkinter as tk
 import json
 import os
-from grid_utils import generate_perimeter_points, sanitize_filename, save_points
+from grid_utils import (
+    generate_perimeter_points, sanitize_filename, save_points,
+    load_edit_profile
+)
+from settings.config.environment_config import environment
+from PyQt5.QtGui import QGuiApplication
 
 SETTINGS_DIR = "settings"
 POINT_RADIUS = 6
@@ -12,6 +17,15 @@ GRID_DIV = 10
 
 def get_point_path(display_name):
     return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}_warp_map_points.json")
+
+def get_screen_index(display_name):
+    screens = QGuiApplication.screens()
+    edit_display = load_edit_profile()
+    active_screens = [s for s in screens if s.name() != edit_display]
+    for idx, screen in enumerate(active_screens):
+        if screen.name() == display_name:
+            return idx
+    return None
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
@@ -79,12 +93,6 @@ def main():
 
     canvas = EditorCanvas(main_frame, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
-
-    button_frame = tk.Frame(root)
-    button_frame.pack(fill="x")
-
-    save_button = tk.Button(button_frame, text="保存", command=canvas.save)
-    save_button.pack(side="bottom", pady=5)
 
     root.mainloop()
 

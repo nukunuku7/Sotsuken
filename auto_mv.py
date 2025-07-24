@@ -261,7 +261,7 @@ def get_freq_spectrum(audio, log_bins):
     freqs = np.fft.rfftfreq(len(audio), 1 / SR)
     bar_heights = np.zeros(N_BARS)
     THRESHOLD_DB = -70
-    BASE_GAIN_DB = 40
+    BASE_GAIN_DB = 35
 
     for i in range(N_BARS):
         mask = (freqs >= log_bins[i]) & (freqs < log_bins[i + 1])

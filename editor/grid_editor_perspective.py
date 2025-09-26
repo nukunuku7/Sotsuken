@@ -4,7 +4,7 @@ import argparse
 import tkinter as tk
 import json
 import os
-from grid_utils import (
+from Sotsuken.editor.grid_utils import (
     generate_perspective_points, sanitize_filename, save_points,
     generate_quad_points, load_edit_profile
 )

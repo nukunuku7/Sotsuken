@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtCore import Qt
 
-from grid_utils import sanitize_filename, auto_generate_from_environment
+from Sotsuken.editor.grid_utils import sanitize_filename, auto_generate_from_environment
 
 SETTINGS_DIR = "settings"
 EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
@@ -138,7 +138,7 @@ class MainWindow(QMainWindow):
             subprocess.Popen(cmd)
 
     def force_save_grids(self, mode):
-        from grid_utils import auto_generate_from_environment
+        from Sotsuken.editor.grid_utils import auto_generate_from_environment
         auto_generate_from_environment(mode=mode)
         QMessageBox.information(self, "保存完了", f"モード '{mode}' のグリッドを全ディスプレイに保存しました。")
 

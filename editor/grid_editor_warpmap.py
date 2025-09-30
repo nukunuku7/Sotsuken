@@ -4,7 +4,7 @@ import argparse
 import tkinter as tk
 import json
 import os
-from Sotsuken.editor.grid_utils import (
+from editor.grid_utils import (
     generate_perimeter_points, sanitize_filename, save_points,
     load_edit_profile
 )

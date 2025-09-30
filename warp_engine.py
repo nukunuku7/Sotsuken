@@ -4,7 +4,7 @@ import os
 import json
 import numpy as np
 import cv2
-from Sotsuken.editor.grid_utils import sanitize_filename
+from editor.grid_utils import sanitize_filename
 
 SETTINGS_DIR = "settings"
 BLEND_WIDTH_RATIO = 0.1

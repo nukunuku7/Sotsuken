@@ -12,7 +12,7 @@ MIRROR_OFFSET = 0.7  # 鏡までのオフセット距離
 NUM_SCREENS = 3
 FOV = 100.0  # プロジェクターの水平視野角
 
-CONFIG_PATH = "settings/config/environment_config.py"  # 出力先パス
+CONFIG_PATH = "config/environment_config.py"  # 出力先パス
 
 def rotation_matrix_z(degrees):
     theta = np.radians(degrees)

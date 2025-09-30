@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtCore import Qt
 
-from Sotsuken.editor.grid_utils import sanitize_filename, auto_generate_from_environment
+from editor.grid_utils import sanitize_filename, auto_generate_from_environment
 
 SETTINGS_DIR = "settings"
 EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
 
     def launch_editors(self):
         mode = self.mode_selector.currentText()
-        script = "grid_editor_perspective.py" if mode == "perspective" else "grid_editor_warpmap.py"
+        script = os.path.join("editor", "grid_editor_perspective.py") if mode == "perspective" else os.path.join("editor", "grid_editor_warpmap.py")
 
         auto_generate_from_environment(mode=mode)
         self.launch_instruction_window(mode)
@@ -127,6 +127,9 @@ class MainWindow(QMainWindow):
             if screen.name() == self.edit_display_name:
                 continue
             geom = screen.geometry()
+
+            module_name = f"editor.{os.path.splitext(script)[0]}"
+
             cmd = [
                 sys.executable,
                 os.path.join(os.path.dirname(__file__), script),
@@ -138,7 +141,7 @@ class MainWindow(QMainWindow):
             subprocess.Popen(cmd)
 
     def force_save_grids(self, mode):
-        from Sotsuken.editor.grid_utils import auto_generate_from_environment
+        from editor.grid_utils import auto_generate_from_environment
         auto_generate_from_environment(mode=mode)
         QMessageBox.information(self, "保存完了", f"モード '{mode}' のグリッドを全ディスプレイに保存しました。")
 

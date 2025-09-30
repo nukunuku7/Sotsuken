@@ -6,7 +6,7 @@ import json
 import math
 
 from PyQt5.QtGui import QGuiApplication
-from settings.config.environment_config import environment
+from config.environment_config import environment
 
 # -----------------------------
 # 設定

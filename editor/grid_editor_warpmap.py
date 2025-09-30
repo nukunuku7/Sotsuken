@@ -8,7 +8,7 @@ from Sotsuken.editor.grid_utils import (
     generate_perimeter_points, sanitize_filename, save_points,
     load_edit_profile
 )
-from settings.config.environment_config import environment
+from config.environment_config import environment
 from PyQt5.QtGui import QGuiApplication
 
 SETTINGS_DIR = "settings"

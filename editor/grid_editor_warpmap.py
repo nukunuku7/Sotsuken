@@ -1,31 +1,15 @@
-# grid_editor_warpmap.py（環境設定ベースの初期グリッド対応）
-
 import argparse
 import tkinter as tk
 import json
 import os
 from editor.grid_utils import (
     generate_perimeter_points, sanitize_filename, save_points,
-    load_edit_profile
+    load_edit_profile, get_point_path
 )
-from config.environment_config import environment
 from PyQt5.QtGui import QGuiApplication
 
-SETTINGS_DIR = "settings"
 POINT_RADIUS = 6
 GRID_DIV = 10
-
-def get_point_path(display_name):
-    return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}_warp_map_points.json")
-
-def get_screen_index(display_name):
-    screens = QGuiApplication.screens()
-    edit_display = load_edit_profile()
-    active_screens = [s for s in screens if s.name() != edit_display]
-    for idx, screen in enumerate(active_screens):
-        if screen.name() == display_name:
-            return idx
-    return None
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
@@ -45,7 +29,9 @@ class EditorCanvas(tk.Canvas):
         self.delete("all")
         for i in range(len(self.points)):
             x, y = self.points[i]
-            self.create_oval(x - POINT_RADIUS, y - POINT_RADIUS, x + POINT_RADIUS, y + POINT_RADIUS, fill="red")
+            self.create_oval(x - POINT_RADIUS, y - POINT_RADIUS,
+                             x + POINT_RADIUS, y + POINT_RADIUS,
+                             fill="red")
             x2, y2 = self.points[(i + 1) % len(self.points)]
             self.create_line(x, y, x2, y2, fill="green", width=2)
 
@@ -64,7 +50,7 @@ class EditorCanvas(tk.Canvas):
         self.dragging_point = None
 
     def load_initial_points(self):
-        path = get_point_path(self.display_name)
+        path = get_point_path(self.display_name, mode="warp_map")
         if os.path.exists(path):
             with open(path, "r") as f:
                 return json.load(f)
@@ -72,11 +58,10 @@ class EditorCanvas(tk.Canvas):
 
     def save(self):
         save_points(self.display_name, self.points, mode="warp_map")
-        print(f"✅ 保存: {get_point_path(self.display_name)}")
+        print(f"✅ 保存: {get_point_path(self.display_name, mode='warp_map')}")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode")
     parser.add_argument("--display", required=True)
     parser.add_argument("--x", type=int)
     parser.add_argument("--y", type=int)
@@ -88,10 +73,7 @@ def main():
     root.title(f"{args.display} - 自由変形モード")
     root.geometry(f"{args.w}x{args.h}+{args.x}+{args.y}")
 
-    main_frame = tk.Frame(root)
-    main_frame.pack(fill="both", expand=True)
-
-    canvas = EditorCanvas(main_frame, args.display, args.w, args.h)
+    canvas = EditorCanvas(root, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
 
     root.mainloop()

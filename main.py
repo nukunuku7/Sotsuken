@@ -15,7 +15,7 @@ from PyQt5.QtCore import Qt
 
 from editor.grid_utils import sanitize_filename, auto_generate_from_environment
 
-SETTINGS_DIR = "settings"
+SETTINGS_DIR = "Projector_profiles"
 EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
 os.makedirs(SETTINGS_DIR, exist_ok=True)
 
@@ -128,11 +128,11 @@ class MainWindow(QMainWindow):
                 continue
             geom = screen.geometry()
 
-            module_name = f"editor.{os.path.splitext(script)[0]}"
+            module_name = f"Sotsuken\editor\{os.path.splitext(script)[0]}"
 
             cmd = [
                 sys.executable,
-                os.path.join(os.path.dirname(__file__), script),
+                "-m", module_name,
                 "--mode", mode,
                 "--display", screen.name(),
                 "--x", str(geom.x()), "--y", str(geom.y()),

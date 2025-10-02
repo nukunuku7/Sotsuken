@@ -1,41 +1,14 @@
-# grid_editor_perspective.py（保存ボタン削除・操作ガイド依存）
-
 import argparse
 import tkinter as tk
 import json
 import os
 from editor.grid_utils import (
     generate_perspective_points, sanitize_filename, save_points,
-    generate_quad_points, load_edit_profile
+    get_point_path
 )
-from config.environment_config import environment
 from PyQt5.QtGui import QGuiApplication
 
-SETTINGS_DIR = "settings"
 POINT_RADIUS = 8
-
-def get_point_path(display_name):
-    return os.path.join(SETTINGS_DIR, f"{sanitize_filename(display_name)}_perspective_points.json")
-
-def get_screen_index(display_name):
-    screens = QGuiApplication.screens()
-    edit_display = load_edit_profile()
-    active_screens = [s for s in screens if s.name() != edit_display]
-    for idx, screen in enumerate(active_screens):
-        if screen.name() == display_name:
-            return idx
-    return None
-
-def get_environment_grid(display_name, w, h):
-    index = get_screen_index(display_name)
-    if index is None or index >= len(environment["screens"]):
-        return generate_perspective_points(w, h)
-    screen_def = environment["screens"][index]
-    quad = generate_quad_points(
-        screen_def["center"], screen_def["normal"],
-        width=screen_def.get("width", 1.2), height=screen_def.get("height", 0.9)
-    )
-    return [[(x + 1) * w / 2, (y + 1) * h / 2] for x, y in quad]
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
@@ -53,9 +26,12 @@ class EditorCanvas(tk.Canvas):
 
     def draw(self):
         self.delete("all")
-        self.create_polygon(*sum(self.points, []), outline="green", fill="", width=2)
+        self.create_polygon(*sum(self.points, []),
+                            outline="green", fill="", width=2)
         for x, y in self.points:
-            self.create_oval(x - POINT_RADIUS, y - POINT_RADIUS, x + POINT_RADIUS, y + POINT_RADIUS, fill="red")
+            self.create_oval(x - POINT_RADIUS, y - POINT_RADIUS,
+                             x + POINT_RADIUS, y + POINT_RADIUS,
+                             fill="red")
 
     def on_press(self, event):
         for i, (x, y) in enumerate(self.points):
@@ -72,15 +48,18 @@ class EditorCanvas(tk.Canvas):
         self.dragging_point = None
 
     def load_initial_points(self):
-        path = get_point_path(self.display_name)
+        path = get_point_path(self.display_name, mode="perspective")
         if os.path.exists(path):
             with open(path, "r") as f:
                 return json.load(f)
-        return get_environment_grid(self.display_name, self.w, self.h)
+        return generate_perspective_points(self.w, self.h)
+
+    def save(self):
+        save_points(self.display_name, self.points, mode="perspective")
+        print(f"✅ 保存: {get_point_path(self.display_name, mode='perspective')}")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode")
     parser.add_argument("--display", required=True)
     parser.add_argument("--x", type=int)
     parser.add_argument("--y", type=int)
@@ -92,10 +71,7 @@ def main():
     root.title(f"{args.display} - 射影変換モード")
     root.geometry(f"{args.w}x{args.h}+{args.x}+{args.y}")
 
-    main_frame = tk.Frame(root)
-    main_frame.pack(fill="both", expand=True)
-
-    canvas = EditorCanvas(main_frame, args.display, args.w, args.h)
+    canvas = EditorCanvas(root, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
 
     root.mainloop()

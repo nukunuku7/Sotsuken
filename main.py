@@ -1,33 +1,40 @@
-# main.py（修正済み：補助ウィンドウ表示付き）
+# main.py（修正版：チェック付きディスプレイのみ保存）
 
 import sys
 import os
 import json
 import subprocess
-import re
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
-    QLabel, QMessageBox, QComboBox, QListWidget, QListWidgetItem, QCheckBox
+    QLabel, QMessageBox, QComboBox, QListWidget, QListWidgetItem
 )
 from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtCore import Qt
 
 from editor.grid_utils import sanitize_filename, auto_generate_from_environment
 
-SETTINGS_DIR = "Projector_profiles"
-EDIT_PROFILE_PATH = os.path.join(SETTINGS_DIR, "edit_profile.json")
+# 設定ファイルの指定
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # main.py のあるディレクトリ
+CONFIG_DIR = os.path.join(BASE_DIR, "config")
+SETTINGS_DIR = os.path.join(CONFIG_DIR, "projector_profiles")
+
 os.makedirs(SETTINGS_DIR, exist_ok=True)
+
+EDIT_PROFILE_PATH = os.path.join(CONFIG_DIR, "edit_profile.json")
+
 
 def save_edit_profile(display_name):
     with open(EDIT_PROFILE_PATH, "w") as f:
         json.dump({"display": display_name}, f)
+
 
 def load_edit_profile():
     if os.path.exists(EDIT_PROFILE_PATH):
         with open(EDIT_PROFILE_PATH, "r") as f:
             return json.load(f).get("display")
     return None
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -107,7 +114,7 @@ class MainWindow(QMainWindow):
         label.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
 
-        save_button = QPushButton("すべてのグリッドを保存")
+        save_button = QPushButton("チェック済みディスプレイを保存")
         save_button.setStyleSheet("font-size: 14px; background-color: #00cc66; color: white; padding: 10px;")
         save_button.clicked.connect(lambda: self.force_save_grids(mode))
         layout.addWidget(save_button)
@@ -128,12 +135,11 @@ class MainWindow(QMainWindow):
                 continue
             geom = screen.geometry()
 
-            module_name = f"Sotsuken\editor\{os.path.splitext(script)[0]}"
+            script_path = os.path.join(BASE_DIR, "editor", "grid_editor_perspective.py" if mode == "perspective" else "grid_editor_warpmap.py")
 
             cmd = [
                 sys.executable,
-                "-m", module_name,
-                "--mode", mode,
+                script_path,
                 "--display", screen.name(),
                 "--x", str(geom.x()), "--y", str(geom.y()),
                 "--w", str(geom.width()), "--h", str(geom.height())
@@ -141,9 +147,23 @@ class MainWindow(QMainWindow):
             subprocess.Popen(cmd)
 
     def force_save_grids(self, mode):
+        selected_names = []
+        for i in range(self.projector_list.count()):
+            item = self.projector_list.item(i)
+            if item.checkState():
+                selected_names.append(item.text())
+
+        if not selected_names:
+            QMessageBox.warning(self, "警告", "保存対象のディスプレイが選択されていません")
+            return
+
         from editor.grid_utils import auto_generate_from_environment
-        auto_generate_from_environment(mode=mode)
-        QMessageBox.information(self, "保存完了", f"モード '{mode}' のグリッドを全ディスプレイに保存しました。")
+        auto_generate_from_environment(mode=mode, displays=selected_names)
+
+        QMessageBox.information(
+            self, "保存完了",
+            f"モード '{mode}' のグリッドを {', '.join(selected_names)} に保存しました。"
+        )
 
     def launch_correction_display(self):
         selected_names = []
@@ -164,6 +184,7 @@ class MainWindow(QMainWindow):
             "--mode", mode
         ]
         subprocess.Popen(cmd)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

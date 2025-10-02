@@ -1,12 +1,24 @@
+# grid_editor_warpmap.py
+
 import argparse
 import tkinter as tk
 import json
+import sys
 import os
+
+# ---- ModuleNotFoundError 対策 ----
+def ensure_module_path():
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if base_dir not in sys.path:
+        sys.path.insert(0, base_dir)
+    return base_dir
+
+BASE_DIR = ensure_module_path()
+
 from editor.grid_utils import (
-    generate_perimeter_points, sanitize_filename, save_points,
+    generate_perimeter_points, save_points,
     load_edit_profile, get_point_path
 )
-from PyQt5.QtGui import QGuiApplication
 
 POINT_RADIUS = 6
 GRID_DIV = 10

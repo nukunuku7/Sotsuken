@@ -1,3 +1,5 @@
+# grid_utils.py
+
 import os
 import re
 import json
@@ -8,8 +10,9 @@ from config.environment_config import environment
 # -----------------------------
 # 設定
 # -----------------------------
-CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "config")
-PROFILE_DIR = os.path.join(CONFIG_DIR, "projector_profiles")
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  # Sotsuken直下
+CONFIG_DIR = os.path.join(BASE_DIR, "config")  # Sotsuken/config
+PROFILE_DIR = os.path.join(CONFIG_DIR, "projector_profiles")  # Sotsuken/config/projector_profiles
 os.makedirs(PROFILE_DIR, exist_ok=True)
 
 # -----------------------------
@@ -74,7 +77,7 @@ def generate_grid_from_quad(corners, div=10):
             grid.append(pt)
     return grid
 
-def auto_generate_from_environment(mode="perspective"):
+def auto_generate_from_environment(mode="perspective", displays=None):
     app = QGuiApplication.instance() or QGuiApplication([])
     screens = QGuiApplication.screens()
     edit_display = load_edit_profile()
@@ -90,6 +93,10 @@ def auto_generate_from_environment(mode="perspective"):
 
     for (i, screen), screen_def in zip(screen_map.items(), screen_defs):
         name = screen.name()
+        if displays is not None and name not in displays:
+            # 選択されていないディスプレイはスキップ
+            continue
+
         geom = screen.geometry()
         w, h = geom.width(), geom.height()
 
@@ -102,7 +109,10 @@ def auto_generate_from_environment(mode="perspective"):
         save_points(name, points, mode=mode)
         print(f"✔ グリッド生成: {name} → {len(points)}点（モード: {mode}）")
 
-    print("🎉 全ディスプレイのグリッド生成完了")
+    if displays:
+        print(f"🎉 選択ディスプレイ({', '.join(displays)}) のグリッド生成完了")
+    else:
+        print("🎉 全ディスプレイのグリッド生成完了")
 
 # -----------------------------
 # ベクトル演算

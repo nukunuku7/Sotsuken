@@ -38,7 +38,7 @@ class DisplayWindow(QWidget):
         img = self.blank_image.copy()
         cv2.circle(img, (img.shape[1] // 2, img.shape[0] // 2), 100, (255, 255, 255), -1)
 
-        warped = warp_image(img, warp_info=self.warp_info)
+        warped = warp_image(img.copy(), warp_info=self.warp_info)
         h, w, ch = warped.shape
         bytes_per_line = ch * w
         qt_image = QImage(warped.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()

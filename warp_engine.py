@@ -1,26 +1,37 @@
-# warp_engine.py（初回のみ補正マップ作成、以降は再利用）
-
 import os
 import json
 import numpy as np
 import cv2
-from editor.grid_utils import sanitize_filename
 
-SETTINGS_DIR = "settings"
+# projector_profiles 配下を参照
+BASE_DIR = os.path.join("config", "projector_profiles")
 BLEND_WIDTH_RATIO = 0.1
 
 warp_cache = {}  # display_name → precomputed data
 
 def get_points_path(display_name, mode):
-    safe_name = sanitize_filename(display_name)
-    return os.path.join(SETTINGS_DIR, f"{safe_name}_{mode}_points.json")
+    """
+    DISPLAY名から対応するJSONファイルパスを生成
+    """
+    # 既存のファイル名に合わせて "__._DISPLAY2" をそのまま使う
+    safe_name = display_name.replace("\\", "_").replace(":", "_")
+    path1 = os.path.join(BASE_DIR, f"{display_name}_{mode}_points.json")
+    path2 = os.path.join(BASE_DIR, f"{safe_name}_{mode}_points.json")
+
+    # 優先的に既存ファイルを探す
+    for p in [path1, path2]:
+        if os.path.exists(p):
+            return p
+
+    # 見つからなければ既存フォーマットに寄せる
+    return os.path.join(BASE_DIR, f"__._{display_name}_{mode}_points.json")
 
 def load_points(display_name, mode):
     path = get_points_path(display_name, mode)
     if not os.path.exists(path):
         print(f"[DEBUG] グリッドファイルが存在しません: {path}")
         return None
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         points = json.load(f)
     print(f"[DEBUG] グリッド読み込み成功: {path} ({len(points)}点)")
     return np.array(points, dtype=np.float32)
@@ -43,6 +54,10 @@ def generate_perspective_matrix(src_size, dst_points):
     return cv2.getPerspectiveTransform(src_pts, dst_pts)
 
 def prepare_warp(display_name, mode, src_size):
+    cache_key = (display_name, mode, src_size)
+    if cache_key in warp_cache:
+        return warp_cache[cache_key]
+
     points = load_points(display_name, mode)
     if points is None or len(points) < 4:
         return None
@@ -51,7 +66,8 @@ def prepare_warp(display_name, mode, src_size):
     if mode == "perspective":
         matrix = generate_perspective_matrix((h, w), points[:4])
         fade = generate_fade_mask(w, h)
-        return {"mode": mode, "matrix": matrix, "fade": fade}
+        warp_cache[cache_key] = {"mode": mode, "matrix": matrix, "fade": fade}
+        return warp_cache[cache_key]
 
     elif mode == "warp_map":
         mask = np.zeros((h, w), dtype=np.uint8)
@@ -64,7 +80,8 @@ def prepare_warp(display_name, mode, src_size):
         map_x = np.clip(map_x, 0, w - 1)
         map_y = np.clip(map_y, 0, h - 1)
         fade = generate_fade_mask(w, h)
-        return {"mode": mode, "map_x": map_x, "map_y": map_y, "fade": fade}
+        warp_cache[cache_key] = {"mode": mode, "map_x": map_x, "map_y": map_y, "fade": fade}
+        return warp_cache[cache_key]
 
     else:
         print(f"[警告] 未知の補正モードです: {mode}")

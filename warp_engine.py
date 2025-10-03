@@ -13,18 +13,11 @@ def get_points_path(display_name, mode):
     """
     DISPLAY名から対応するJSONファイルパスを生成
     """
-    # 既存のファイル名に合わせて "__._DISPLAY2" をそのまま使う
-    safe_name = display_name.replace("\\", "_").replace(":", "_")
-    path1 = os.path.join(BASE_DIR, f"{display_name}_{mode}_points.json")
-    path2 = os.path.join(BASE_DIR, f"{safe_name}_{mode}_points.json")
-
-    # 優先的に既存ファイルを探す
-    for p in [path1, path2]:
-        if os.path.exists(p):
-            return p
-
-    # 見つからなければ既存フォーマットに寄せる
-    return os.path.join(BASE_DIR, f"__._{display_name}_{mode}_points.json")
+    # Windows形式の "\\.\DISPLAY2" → "DISPLAY2" に変換
+    base_name = display_name.replace("\\\\.\\", "")
+    
+    # 実際のファイル名に合わせる
+    return os.path.join(BASE_DIR, f"__._{base_name}_{mode}_points.json")
 
 def load_points(display_name, mode):
     path = get_points_path(display_name, mode)

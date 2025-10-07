@@ -16,28 +16,30 @@ from editor.grid_utils import sanitize_filename, auto_generate_from_environment
 
 # 設定ファイルの指定
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # main.py のあるディレクトリ
-CONFIG_DIR = os.path.join(BASE_DIR, "config")
-SETTINGS_DIR = os.path.join(CONFIG_DIR, "projector_profiles")
+CONFIG_DIR = os.path.join(BASE_DIR, "config") # configディレクトリ
+SETTINGS_DIR = os.path.join(CONFIG_DIR, "projector_profiles") # projector_profilesディレクトリ
 
-os.makedirs(SETTINGS_DIR, exist_ok=True)
+os.makedirs(SETTINGS_DIR, exist_ok=True) # ディレクトリがなければ作成
 
-EDIT_PROFILE_PATH = os.path.join(CONFIG_DIR, "edit_profile.json")
+EDIT_PROFILE_PATH = os.path.join(CONFIG_DIR, "edit_profile.json") # 編集用プロファイル保存パス
 
 
-def save_edit_profile(display_name):
+# --- 編集用ディスプレイ関係 ---
+def save_edit_profile(display_name): # 編集用ディスプレイ名を保存
     with open(EDIT_PROFILE_PATH, "w") as f:
         json.dump({"display": display_name}, f)
 
 
-def load_edit_profile():
+def load_edit_profile(): # 編集用ディスプレイ名を読み込み
     if os.path.exists(EDIT_PROFILE_PATH):
         with open(EDIT_PROFILE_PATH, "r") as f:
             return json.load(f).get("display")
     return None
 
 
+# --- メインウィンドウ ---
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self): # タイトル設定、レイアウト設定
         super().__init__()
         self.setWindowTitle("360°歪み補正プロジェクションシステム")
         self.setGeometry(200, 200, 480, 400)
@@ -73,13 +75,13 @@ class MainWindow(QMainWindow):
         self.init_display_info()
         self.init_projector_list()
 
-    def init_display_info(self):
+    def init_display_info(self): # 編集用ディスプレイの初期化
         screen = QGuiApplication.primaryScreen()
         self.edit_display_name = screen.name()
         self.label.setText(f"編集用ディスプレイ：{self.edit_display_name}")
         save_edit_profile(self.edit_display_name)
 
-    def init_projector_list(self):
+    def init_projector_list(self): # 出力先ディスプレイの初期化
         screens = QGuiApplication.screens()
         for screen in screens:
             if screen.name() == self.edit_display_name:
@@ -89,7 +91,7 @@ class MainWindow(QMainWindow):
             item.setCheckState(Qt.Unchecked)
             self.projector_list.addItem(item)
 
-    def launch_instruction_window(self, mode):
+    def launch_instruction_window(self, mode): # 保存操作ガイドの表示
         geom = None
         for screen in QGuiApplication.screens():
             if screen.name() == self.edit_display_name:
@@ -122,7 +124,7 @@ class MainWindow(QMainWindow):
         self.instruction_window.setLayout(layout)
         self.instruction_window.show()
 
-    def launch_editors(self):
+    def launch_editors(self): # グリッドエディター起動
         mode = self.mode_selector.currentText()
         script = os.path.join("editor", "grid_editor_perspective.py") if mode == "perspective" else os.path.join("editor", "grid_editor_warpmap.py")
 
@@ -146,7 +148,7 @@ class MainWindow(QMainWindow):
             ]
             subprocess.Popen(cmd)
 
-    def force_save_grids(self, mode):
+    def force_save_grids(self, mode): # チェック済みディスプレイのグリッドを保存
         selected_names = []
         for i in range(self.projector_list.count()):
             item = self.projector_list.item(i)
@@ -165,7 +167,7 @@ class MainWindow(QMainWindow):
             f"モード '{mode}' のグリッドを {', '.join(selected_names)} に保存しました。"
         )
 
-    def launch_correction_display(self):
+    def launch_correction_display(self): # 補正表示の起動
         selected_names = []
         for i in range(self.projector_list.count()):
             item = self.projector_list.item(i)
@@ -186,6 +188,7 @@ class MainWindow(QMainWindow):
         subprocess.Popen(cmd)
 
 
+# --- アプリ起動 ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = MainWindow()

@@ -1,52 +1,85 @@
-# grid_utils.py
-
 import os
-import re
 import json
-import math
+import re
+from datetime import datetime
 from PyQt5.QtGui import QGuiApplication
-from config.environment_config import environment
 
-# -----------------------------
-# 設定
-# -----------------------------
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  # Sotsuken直下
-CONFIG_DIR = os.path.join(BASE_DIR, "config")  # Sotsuken/config
-PROFILE_DIR = os.path.join(CONFIG_DIR, "projector_profiles")  # Sotsuken/config/projector_profiles
+# === 定数 ===
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROFILE_DIR = os.path.join(ROOT_DIR, "config", "projector_profiles")
 os.makedirs(PROFILE_DIR, exist_ok=True)
 
-# -----------------------------
-# ファイル関連ユーティリティ
-# -----------------------------
-def sanitize_filename(name):
-    return re.sub(r'[\\/:*?"<>|]', '_', name)
+# === 基本ユーティリティ ===
+def sanitize_filename(name: str) -> str:
+    """Windowsでも安全に扱えるファイル名に変換"""
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    name = name.replace(" ", "_")
+    return name.strip("_")
 
-def get_point_path(display_name, mode="perspective"):
-    safe_name = sanitize_filename(display_name)
-    return os.path.join(PROFILE_DIR, f"{safe_name}_{mode}_points.json")
+def log(msg: str):
+    print(f"[DEBUG] {msg}")
 
-def save_points(display_name, points, mode="perspective"):
+# === ファイル名生成 ===
+def get_point_path(display_name: str, mode: str = "perspective") -> str:
+    """
+    指定ディスプレイの補正点保存パスを返す。
+    "__._" プレフィックスが重複しないよう自動判定。
+    """
+    base = display_name.replace("\\", "_").replace(":", "_")
+    safe_name = sanitize_filename(base)
+
+    # "__._" がすでに含まれている場合は重複回避
+    if not safe_name.startswith("__._"):
+        safe_name = "__._" + safe_name
+
+    filename = f"{safe_name}_{mode}_points.json"
+    return os.path.join(PROFILE_DIR, filename)
+
+# === 読み込み / 保存 ===
+def save_points(display_name: str, points: list, mode: str = "perspective"):
+    """ディスプレイごとの補正点を保存"""
     path = get_point_path(display_name, mode)
-    with open(path, "w") as f:
-        json.dump(points, f)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(points, f, indent=2, ensure_ascii=False)
+        log(f"[SAVE] saved points -> {path}")
+    except Exception as e:
+        log(f"[ERROR] Failed to save points: {e}")
 
-def load_points(display_name, mode="perspective"):
+def load_points(display_name: str, mode: str = "perspective"):
+    """保存済みの補正点を読み込む"""
     path = get_point_path(display_name, mode)
     if not os.path.exists(path):
+        log(f"[DEBUG] グリッドファイルが存在しません: {path}")
         return None
-    with open(path, "r") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        log(f"[LOAD] loaded points <- {path}")
+        return data
+    except Exception as e:
+        log(f"[ERROR] Failed to load points: {e}")
+        return None
 
-def load_edit_profile():
-    path = os.path.join(CONFIG_DIR, "edit_profile.json")
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f).get("display")
-    return None
+# === グリッド生成 ===
+def generate_grid_points(cols: int = 6, rows: int = 6) -> list:
+    """cols×rows の2Dグリッド点を生成"""
+    return [[x / (cols - 1), y / (rows - 1)] for y in range(rows) for x in range(cols)]
 
-# -----------------------------
-# グリッド生成系
-# -----------------------------
+def create_display_grid(display_name: str, mode: str = "warp_map"):
+    """ディスプレイごとに新しいグリッドを生成して保存"""
+    points = generate_grid_points()
+    save_points(display_name, points, mode)
+    log(f"✔ グリッド生成: {display_name} → {len(points)}点（モード: {mode}）")
+    return points
+
+# === 全ディスプレイ一括生成 ===
+def generate_all_displays_grid(displays: list):
+    """複数ディスプレイに対してグリッドを自動生成"""
+    for d in displays:
+        create_display_grid(d, "warp_map")
+    log("🎉 全ディスプレイのグリッド生成完了")
+
 def generate_perimeter_points(w, h, div=10):
     points = []
     for i in range(div):
@@ -59,67 +92,52 @@ def generate_perimeter_points(w, h, div=10):
         points.append([0, h * i / (div - 1)])
     return points
 
+
 def generate_perspective_points(w, h):
     return [[0, 0], [w, 0], [w, h], [0, h]]
 
-def generate_grid_from_quad(corners, div=10):
-    if len(corners) != 4:
-        raise ValueError(f"quadの定義は4点必要ですが {len(corners)} 点しかありません: {corners}")
-    p00, p10, p11, p01 = corners
-    grid = []
-    for i in range(div + 1):
-        u = i / div
-        left = [p00[j] * (1 - u) + p01[j] * u for j in range(2)]
-        right = [p10[j] * (1 - u) + p11[j] * u for j in range(2)]
-        for j in range(div + 1):
-            v = j / div
-            pt = [left[k] * (1 - v) + right[k] * v for k in range(2)]
-            grid.append(pt)
-    return grid
+# === 旧ファイル検出・整理 ===
+def list_existing_profiles():
+    """保存済みの全補正ファイルを一覧表示"""
+    files = [f for f in os.listdir(PROFILE_DIR) if f.endswith(".json")]
+    return sorted(files)
 
-def auto_generate_from_environment(mode="perspective", displays=None):
+def cleanup_old_profiles():
+    """旧フォーマットのファイルをリネームして統一"""
+    for f in list_existing_profiles():
+        old_path = os.path.join(PROFILE_DIR, f)
+        if f.startswith("__.___._"):  # 二重接頭辞を検出
+            fixed_name = f.replace("__.___._", "__._", 1)
+            new_path = os.path.join(PROFILE_DIR, fixed_name)
+            os.rename(old_path, new_path)
+            log(f"[CLEANUP] renamed: {f} → {fixed_name}")
+    log("🧹 古いファイル名のクリーニング完了")
+
+def auto_generate_from_environment(mode="warp_map", displays=None):
+    """
+    現在の接続ディスプレイ情報から、選択された or 全ディスプレイ分の
+    グリッドJSONを自動生成する。
+    """
     app = QGuiApplication.instance() or QGuiApplication([])
     screens = QGuiApplication.screens()
-    edit_display = load_edit_profile()
-    screen_map = {i: s for i, s in enumerate(screens) if s.name() != edit_display}
 
-    screen_defs_all = environment["screens"]
-    screen_defs = screen_defs_all[:len(screen_map)]
+    # 指定がなければ、編集ディスプレイ（DISPLAY1など）以外を全対象とする
+    if not displays:
+        primary = QGuiApplication.primaryScreen().name()
+        displays = [s.name() for s in screens if s.name() != primary]
 
-    if len(screen_defs_all) > len(screen_map):
-        print("[警告] 定義されたスクリーン数が接続ディスプレイより多いため、一部は省略されます。")
-    elif len(screen_defs_all) < len(screen_map):
-        print("[警告] 接続ディスプレイの数が定義より多いため、余剰ディスプレイは無視されます。")
+    if not displays:
+        print("[WARN] グリッドを生成するディスプレイが見つかりません。")
+        return
 
-    for (i, screen), screen_def in zip(screen_map.items(), screen_defs):
-        name = screen.name()
-        if displays is not None and name not in displays:
-            # 選択されていないディスプレイはスキップ
-            continue
+    cleanup_old_profiles()  # 重複プレフィックス修正
+    for name in displays:
+        create_display_grid(name, mode)
+    print(f"🎉 選択ディスプレイ（{len(displays)}台）のグリッドを生成完了。")
 
-        geom = screen.geometry()
-        w, h = geom.width(), geom.height()
 
-        if mode == "warp_map":
-            points = generate_perimeter_points(w, h, div=10)
-        else:
-            # perspectiveモード: 仮の矩形
-            points = generate_perspective_points(w, h)
-
-        save_points(name, points, mode=mode)
-        print(f"✔ グリッド生成: {name} → {len(points)}点（モード: {mode}）")
-
-    if displays:
-        print(f"🎉 選択ディスプレイ({', '.join(displays)}) のグリッド生成完了")
-    else:
-        print("🎉 全ディスプレイのグリッド生成完了")
-
-# -----------------------------
-# ベクトル演算
-# -----------------------------
-def cross(a, b):
-    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
-
-def normalize(v):
-    mag = math.sqrt(sum(x**2 for x in v))
-    return [x / mag for x in v] if mag > 0 else v
+# === 動作テスト ===
+if __name__ == "__main__":
+    displays = ["\\\\.\\DISPLAY1", "\\\\.\\DISPLAY2"]
+    cleanup_old_profiles()
+    generate_all_displays_grid(displays)

@@ -1,12 +1,10 @@
-# grid_editor_warpmap.py
-
+# editor/grid_editor_warpmap.py
 import argparse
 import tkinter as tk
 import json
 import sys
 import os
 
-# ---- ModuleNotFoundError 対策 ----
 def ensure_module_path():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if base_dir not in sys.path:
@@ -64,7 +62,7 @@ class EditorCanvas(tk.Canvas):
     def load_initial_points(self):
         path = get_point_path(self.display_name, mode="warp_map")
         if os.path.exists(path):
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         return generate_perimeter_points(self.w, self.h, GRID_DIV)
 
@@ -85,8 +83,16 @@ def main():
     root.title(f"{args.display} - 自由変形モード")
     root.geometry(f"{args.w}x{args.h}+{args.x}+{args.y}")
 
-    canvas = EditorCanvas(root, args.display, args.w, args.h)
+    frame = tk.Frame(root)
+    frame.pack(fill="both", expand=True)
+
+    canvas = EditorCanvas(frame, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
+
+    btn_frame = tk.Frame(root)
+    btn_frame.pack(fill="x")
+    save_btn = tk.Button(btn_frame, text="保存", command=canvas.save, bg="#00cc66", fg="white", padx=10, pady=6)
+    save_btn.pack(side="left", padx=8, pady=6)
 
     root.mainloop()
 

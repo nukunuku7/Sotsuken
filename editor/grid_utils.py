@@ -11,16 +11,20 @@ os.makedirs(PROFILE_DIR, exist_ok=True)
 
 # === 基本ユーティリティ ===
 def sanitize_filename(display_name: str, mode: str):
-    """ディスプレイ名とモードに基づいて一意のファイル名を作成"""
-    # 特殊文字（バックスラッシュ・スラッシュ・ピリオド・コロンなど）をすべてアンダースコアに
-    safe_name = re.sub(r'[\\/:*?"<>|.]', "_", display_name)
+    """ディスプレイ名とモードに基づいて安全で一意なファイル名を作成"""
+    # すべての特殊文字をアンダースコアに
+    safe_name = re.sub(r'[\\/:*?"<>|.\s]+', "_", display_name)
 
-    # "__._" プレフィックスがなければ付与
+    # 既存の "__._" があれば重複を防ぐ
+    safe_name = re.sub(r"^_+", "", safe_name)  # 先頭の "_" 群を削除
     if not safe_name.startswith("__._"):
         safe_name = "__._" + safe_name
 
-    # 最終ファイル名
+    # プレフィックスの重複をさらに一段階防止
+    safe_name = re.sub(r"(__\._)+", "__._", safe_name)
+
     return f"{safe_name}_{mode}_points.json"
+
 
 def log(msg: str):
     print(f"[DEBUG] {msg}")
@@ -82,21 +86,20 @@ def generate_grid_points(cols: int = 6, rows: int = 6, width: int = 1920, height
     return [[x / (cols - 1) * width, y / (rows - 1) * height] for y in range(rows) for x in range(cols)]
 
 def create_display_grid(display_name: str, mode: str = "warp_map"):
-    """ディスプレイごとに新しいグリッドを生成して保存"""
-    # QGuiApplicationから対象スクリーンを取得
-    app = QGuiApplication.instance() or QGuiApplication([])
-    screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
-    if screen is None:
-        log(f"[ERROR] 指定ディスプレイが見つかりません: {display_name}")
-        return []
+    """モード別にグリッドを生成して保存"""
+    if mode == "warp_map":
+        points = generate_grid_points(cols=6, rows=6)  # 自由変形用（多点）
+    elif mode == "perspective":
+        # perspective は 4点（矩形）
+        points = generate_perspective_points(1.0, 1.0)
+    else:
+        # その他（保険として）
+        points = generate_grid_points(cols=6, rows=6)
 
-    width = screen.geometry().width()
-    height = screen.geometry().height()
-
-    points = generate_grid_points(width=width, height=height)
     save_points(display_name, points, mode)
     log(f"✔ グリッド生成: {display_name} → {len(points)}点（モード: {mode}）")
     return points
+
 
 # === 全ディスプレイ一括生成 ===
 def generate_all_displays_grid(displays: list):

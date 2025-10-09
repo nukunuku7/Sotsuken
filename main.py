@@ -101,8 +101,9 @@ class MainWindow(QMainWindow):
             return
 
         msg = (
-            "各補正ディスプレイでグリッドを微調整し、"
-            "下のボタンを押してからウィンドウを閉じてください。"
+            "各補正ディスプレイでグリッドを微調整し、\n"
+            "下のボタンを押してからウィンドウを閉じてください。\n"
+            "escキーでグリッド画面が終了します。"
         )
 
         self.instruction_window = QWidget()

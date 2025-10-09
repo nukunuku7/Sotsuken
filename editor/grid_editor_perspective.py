@@ -1,4 +1,3 @@
-# editor/grid_editor_perspective.py
 import argparse
 import tkinter as tk
 import json
@@ -62,7 +61,6 @@ class EditorCanvas(tk.Canvas):
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        # ←ここ修正
         return generate_perspective_points(self.display_name)
 
     def save(self):
@@ -79,19 +77,21 @@ def main():
     args = parser.parse_args()
 
     root = tk.Tk()
-    root.title(f"{args.display} - 射影変換モード")
     root.geometry(f"{args.w}x{args.h}+{args.x}+{args.y}")
+    root.overrideredirect(True)  # 🔹タイトルバーなどをすべて消す
+    root.bind("<Escape>", lambda e: root.destroy())  # 🔹Escで閉じる
 
-    # layout: canvas + save button
     frame = tk.Frame(root)
     frame.pack(fill="both", expand=True)
 
     canvas = EditorCanvas(frame, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
 
-    btn_frame = tk.Frame(root)
+    # 🔸 保存ボタンは残す（消したい場合はこの部分を削除）
+    btn_frame = tk.Frame(root, bg="black")
     btn_frame.pack(fill="x")
-    save_btn = tk.Button(btn_frame, text="保存", command=canvas.save, bg="#00cc66", fg="white", padx=10, pady=6)
+    save_btn = tk.Button(btn_frame, text="保存", command=canvas.save,
+                         bg="#00cc66", fg="white", padx=10, pady=6)
     save_btn.pack(side="left", padx=8, pady=6)
 
     root.mainloop()

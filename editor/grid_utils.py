@@ -81,20 +81,77 @@ def load_points(display_name: str, mode: str = "perspective"):
         return None
 
 # === グリッド生成 ===
-def generate_grid_points(cols: int = 6, rows: int = 6, width: int = 1920, height: int = 1080) -> list:
-    """cols×rows の2Dグリッド点を画面サイズに合わせて生成"""
-    return [[x / (cols - 1) * width, y / (rows - 1) * height] for y in range(rows) for x in range(cols)]
+def generate_grid_points(display_name: str, cols: int = 10, rows: int = 10) -> list:
+    """
+    ディスプレイ全体をカバーする均等グリッドを生成。
+    出力は画面ピクセル単位。
+    """
+    app = QGuiApplication.instance() or QGuiApplication([])
+    screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
+
+    if screen:
+        geo = screen.geometry()
+        w, h = geo.width(), geo.height()
+    else:
+        w, h = 1920, 1080  # fallback
+
+    points = []
+    for y in range(rows):
+        for x in range(cols):
+            px = x / (cols - 1) * w
+            py = y / (rows - 1) * h
+            points.append([px, py])
+    return points
+
+
+def generate_perspective_points(display_name: str) -> list:
+    """
+    perspective（斜影変換）モードの初期4点を画面端に配置。
+    """
+    app = QGuiApplication.instance() or QGuiApplication([])
+    screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
+
+    if screen:
+        geo = screen.geometry()
+        w, h = geo.width(), geo.height()
+    else:
+        w, h = 1920, 1080
+
+    return [
+        [0, 0],        # 左上
+        [w, 0],        # 右上
+        [w, h],        # 右下
+        [0, h],        # 左下
+    ]
+
 
 def create_display_grid(display_name: str, mode: str = "warp_map"):
     """モード別にグリッドを生成して保存"""
     if mode == "warp_map":
-        points = generate_grid_points(cols=6, rows=6)  # 自由変形用（多点）
+        # 外周のみ（縦横10点分割）
+        app = QGuiApplication.instance() or QGuiApplication([])
+        screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
+        if screen:
+            geo = screen.geometry()
+            w, h = geo.width(), geo.height()
+        else:
+            w, h = 1920, 1080
+
+        points = generate_perimeter_points(w, h, div=10)  # ← 外周のみ生成
+
     elif mode == "perspective":
-        # perspective は 4点（矩形）
-        points = generate_perspective_points(1.0, 1.0)
+        points = generate_perspective_points(display_name)
+
     else:
         # その他（保険として）
-        points = generate_grid_points(cols=6, rows=6)
+        app = QGuiApplication.instance() or QGuiApplication([])
+        screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
+        if screen:
+            geo = screen.geometry()
+            w, h = geo.width(), geo.height()
+        else:
+            w, h = 1920, 1080
+        points = generate_perimeter_points(w, h, div=10)
 
     save_points(display_name, points, mode)
     log(f"✔ グリッド生成: {display_name} → {len(points)}点（モード: {mode}）")
@@ -120,9 +177,6 @@ def generate_perimeter_points(w, h, div=10):
         points.append([0, h * i / (div - 1)])
     return points
 
-
-def generate_perspective_points(w, h):
-    return [[0, 0], [w, 0], [w, h], [0, h]]
 
 # === 旧ファイル検出・整理 ===
 def list_existing_profiles():

@@ -14,9 +14,10 @@ def ensure_module_path():
 BASE_DIR = ensure_module_path()
 
 from editor.grid_utils import (
-    generate_perimeter_points, save_points,
+    generate_grid_points, save_points,
     load_edit_profile, get_point_path
 )
+
 
 POINT_RADIUS = 6
 GRID_DIV = 10
@@ -64,7 +65,9 @@ class EditorCanvas(tk.Canvas):
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        return generate_perimeter_points(self.w, self.h, GRID_DIV)
+        # ←ここ修正
+        return generate_grid_points(self.display_name, cols=10, rows=10)
+
 
     def save(self):
         save_points(self.display_name, self.points, mode="warp_map")

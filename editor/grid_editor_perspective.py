@@ -59,11 +59,11 @@ class EditorCanvas(tk.Canvas):
 
     def load_initial_points(self):
         path = get_point_path(self.display_name, mode="perspective")
-        # get_point_path returns canonical save path, but load_points can also be used
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        return generate_perspective_points(self.w, self.h)
+        # ←ここ修正
+        return generate_perspective_points(self.display_name)
 
     def save(self):
         save_points(self.display_name, self.points, mode="perspective")

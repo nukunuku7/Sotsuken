@@ -18,8 +18,10 @@ from editor.grid_utils import sanitize_filename, auto_generate_from_environment
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # main.py のあるディレクトリ
 CONFIG_DIR = os.path.join(BASE_DIR, "config") # configディレクトリ
 SETTINGS_DIR = os.path.join(CONFIG_DIR, "projector_profiles") # projector_profilesディレクトリ
+TEMP_DIR = os.path.join(BASE_DIR, "temp") # tempディレクトリ
 
 os.makedirs(SETTINGS_DIR, exist_ok=True) # ディレクトリがなければ作成
+os.makedirs(TEMP_DIR, exist_ok=True) # ディレクトリがなければ作成
 
 EDIT_PROFILE_PATH = os.path.join(CONFIG_DIR, "edit_profile.json") # 編集用プロファイル保存パス
 
@@ -45,7 +47,6 @@ class MainWindow(QMainWindow):
         self.setGeometry(200, 200, 480, 400)
 
         layout = QVBoxLayout()
-
         self.label = QLabel("編集用ディスプレイ：未認識")
         layout.addWidget(self.label)
 
@@ -111,8 +112,7 @@ class MainWindow(QMainWindow):
         self.instruction_window.setGeometry(geom.x() + 100, geom.y() + 100, 520, 240)
 
         layout = QVBoxLayout()
-
-        label = QLabel(f"補正モード：{mode} {msg}")
+        label = QLabel(f"補正モード：{mode}\n{msg}")
         label.setStyleSheet("font-size: 16px; padding: 20px; background-color: #222; color: white;")
         label.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
@@ -125,10 +125,8 @@ class MainWindow(QMainWindow):
         self.instruction_window.setLayout(layout)
         self.instruction_window.show()
 
-    def launch_editors(self): # グリッドエディター起動
+    def launch_editors(self):
         mode = self.mode_selector.currentText()
-        script = os.path.join("editor", "grid_editor_perspective.py") if mode == "perspective" else os.path.join("editor", "grid_editor_warpmap.py")
-
         auto_generate_from_environment(mode=mode)
         self.launch_instruction_window(mode)
 
@@ -137,12 +135,15 @@ class MainWindow(QMainWindow):
             if screen.name() == self.edit_display_name:
                 continue
             geom = screen.geometry()
-
-            script_path = os.path.join(BASE_DIR, "editor", "grid_editor_perspective.py" if mode == "perspective" else "grid_editor_warpmap.py")
+            script_path = os.path.join(BASE_DIR, "editor",
+                "grid_editor_perspective.py" if mode == "perspective" else "grid_editor_warpmap.py"
+            )
+            lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(screen.name(), mode)}.lock")
+            with open(lock_path, "w") as f:
+                f.write("active")
 
             cmd = [
-                sys.executable,
-                script_path,
+                sys.executable, script_path,
                 "--display", screen.name(),
                 "--x", str(geom.x()), "--y", str(geom.y()),
                 "--w", str(geom.width()), "--h", str(geom.height())
@@ -163,6 +164,12 @@ class MainWindow(QMainWindow):
         from editor.grid_utils import auto_generate_from_environment
         auto_generate_from_environment(mode=mode, displays=selected_names)
 
+        # 🔽 ロックファイル削除（＝終了トリガー送信）
+        for name in selected_names:
+            lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(name, mode)}.lock")
+            if os.path.exists(lock_path):
+                os.remove(lock_path)
+
         QMessageBox.information(
             self, "保存完了",
             f"モード '{mode}' のグリッドを {', '.join(selected_names)} に保存しました。"
@@ -182,7 +189,7 @@ class MainWindow(QMainWindow):
         mode = self.mode_selector.currentText()
         cmd = [
             sys.executable,
-            os.path.join(os.path.dirname(__file__), "media_player_multi.py"),
+            os.path.join(BASE_DIR, "media_player_multi.py"),
             "--displays", *selected_names,
             "--mode", mode
         ]

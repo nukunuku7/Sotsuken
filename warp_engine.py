@@ -1,33 +1,15 @@
+# warp_engine.py
 import os
 import json
 import numpy as np
 import cv2
 
-# projector_profiles 配下を参照
-BASE_DIR = os.path.join("config", "projector_profiles")
-BLEND_WIDTH_RATIO = 0.1
+# grid_utils から関数を利用
+from editor.grid_utils import load_points, log
 
+BLEND_WIDTH_RATIO = 0.1
 warp_cache = {}  # display_name → precomputed data
 
-def get_points_path(display_name, mode):
-    """
-    DISPLAY名から対応するJSONファイルパスを生成
-    """
-    # Windows形式の "\\.\DISPLAY2" → "DISPLAY2" に変換
-    base_name = display_name.replace("\\\\.\\", "")
-    
-    # 実際のファイル名に合わせる
-    return os.path.join(BASE_DIR, f"__._{base_name}_{mode}_points.json")
-
-def load_points(display_name, mode):
-    path = get_points_path(display_name, mode)
-    if not os.path.exists(path):
-        print(f"[DEBUG] グリッドファイルが存在しません: {path}")
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        points = json.load(f)
-    print(f"[DEBUG] グリッド読み込み成功: {path} ({len(points)}点)")
-    return np.array(points, dtype=np.float32)
 
 def generate_fade_mask(w, h):
     fade = np.ones((h, w), dtype=np.float32)
@@ -38,6 +20,7 @@ def generate_fade_mask(w, h):
         fade[:, w - 1 - x] *= alpha
     return fade
 
+
 def generate_perspective_matrix(src_size, dst_points):
     h, w = src_size
     if len(dst_points) != 4:
@@ -46,13 +29,19 @@ def generate_perspective_matrix(src_size, dst_points):
     dst_pts = np.array(dst_points, dtype=np.float32)
     return cv2.getPerspectiveTransform(src_pts, dst_pts)
 
+
 def prepare_warp(display_name, mode, src_size):
+    """
+    display_name と mode から、warp に必要な情報を読み込む
+    """
     cache_key = (display_name, mode, src_size)
     if cache_key in warp_cache:
         return warp_cache[cache_key]
 
+    # --- grid_utils の load_points を使用 ---
     points = load_points(display_name, mode)
     if points is None or len(points) < 4:
+        log(f"[WARN] グリッド点が不足または存在しません: {display_name} ({mode})")
         return None
 
     h, w = src_size
@@ -60,11 +49,13 @@ def prepare_warp(display_name, mode, src_size):
         matrix = generate_perspective_matrix((h, w), points[:4])
         fade = generate_fade_mask(w, h)
         warp_cache[cache_key] = {"mode": mode, "matrix": matrix, "fade": fade}
+        log(f"[OK] 射影変換情報を準備しました: {display_name}")
         return warp_cache[cache_key]
 
     elif mode == "warp_map":
         mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(mask, [points.astype(np.int32)], 255)
+        cv2.fillPoly(mask, [np.array(points, dtype=np.int32)], 255)
+
         map_x = np.full((h, w), -1, dtype=np.float32)
         map_y = np.full((h, w), -1, dtype=np.float32)
         ys, xs = np.where(mask == 255)
@@ -73,11 +64,13 @@ def prepare_warp(display_name, mode, src_size):
         map_x = np.clip(map_x, 0, w - 1)
         map_y = np.clip(map_y, 0, h - 1)
         fade = generate_fade_mask(w, h)
+
         warp_cache[cache_key] = {"mode": mode, "map_x": map_x, "map_y": map_y, "fade": fade}
+        log(f"[OK] warp_map 情報を準備しました: {display_name}")
         return warp_cache[cache_key]
 
     else:
-        print(f"[警告] 未知の補正モードです: {mode}")
+        log(f"[警告] 未知の補正モードです: {mode}")
         return None
 
 def warp_image(image, warp_info):
@@ -103,5 +96,5 @@ def warp_image(image, warp_info):
         return warped
 
     except Exception as e:
-        print(f"[エラー] warp_image失敗: {e}")
+        log(f"[ERROR] warp_image 失敗: {e}")
         return image

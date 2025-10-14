@@ -3,6 +3,8 @@ import tkinter as tk
 import json
 import sys
 import os
+import threading
+import time
 
 def ensure_module_path():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11,10 +13,12 @@ def ensure_module_path():
     return base_dir
 
 BASE_DIR = ensure_module_path()
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 from editor.grid_utils import (
     generate_grid_points, save_points,
-    load_edit_profile, get_point_path
+    get_point_path, sanitize_filename
 )
 
 POINT_RADIUS = 6
@@ -89,13 +93,27 @@ def main():
     canvas = EditorCanvas(frame, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
 
-    btn_frame = tk.Frame(root, bg="black")
-    btn_frame.pack(fill="x")
-    save_btn = tk.Button(btn_frame, text="保存", command=canvas.save,
-                         bg="#00cc66", fg="white", padx=10, pady=6)
-    save_btn.pack(side="left", padx=8, pady=6)
+    # --- 🔒 ロックファイル監視スレッド ---
+    lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(args.display, 'warp_map')}.lock")
 
+    # 起動時にロックファイルを作成
+    with open(lock_path, "w") as f:
+        f.write("active")
+
+    def watch_lock():
+        while True:
+            time.sleep(0.5)
+            if not os.path.exists(lock_path):
+                # ロックファイル削除を検知 → 自動保存して終了
+                try:
+                    canvas.save()
+                finally:
+                    root.destroy()
+                break
+
+    threading.Thread(target=watch_lock, daemon=True).start()
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

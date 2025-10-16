@@ -175,7 +175,7 @@ class MainWindow(QMainWindow):
             f"モード '{mode}' のグリッドを {', '.join(selected_names)} に保存しました。"
         )
 
-    def launch_correction_display(self): # 補正表示の起動
+    def launch_correction_display(self):  # 補正表示の起動
         selected_names = []
         for i in range(self.projector_list.count()):
             item = self.projector_list.item(i)
@@ -187,13 +187,17 @@ class MainWindow(QMainWindow):
             return
 
         mode = self.mode_selector.currentText()
+        source_display = self.edit_display_name  # 編集用ディスプレイをソースにする
+
         cmd = [
             sys.executable,
             os.path.join(BASE_DIR, "media_player_multi.py"),
-            "--displays", *selected_names,
+            "--source", source_display,
+            "--targets", *selected_names,
             "--mode", mode
         ]
         subprocess.Popen(cmd)
+
 
 
 # --- アプリ起動 ---

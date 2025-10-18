@@ -1,51 +1,166 @@
-# environment_config.py (360° Projection Environment)
-
-# Units in meters
-# This configuration models a room with 3 screens and 3 projectors (360-degree setup)
-
-environment = {
+{
     "screens": [
         {
-            "id": "screen1",
-            "center": [0.0, 1.5, 0.0],        # Front screen center
-            "normal": [1.0, 0.0, 0.0],        # Facing +X direction
-            "radius": 1.5                     # Curved screen radius
+            "name": "Screen1",
+            "position": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
         },
         {
-            "id": "screen2",
-            "center": [0.0, -1.5, 0.0],       # Rear screen center
-            "normal": [-1.0, 0.0, 0.0],       # Facing -X direction
-            "radius": 1.5
+            "name": "Screen2",
+            "position": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
         },
         {
-            "id": "screen3",
-            "center": [0.0, 0.0, 1.5],        # Top screen center
-            "normal": [0.0, 1.0, 0.0],        # Facing +Y (vertical up)
-            "radius": 1.5
+            "name": "Screen3",
+            "position": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
         }
     ],
-
+    "mirrors": [
+        {
+            "name": "Mirror1",
+            "position": [
+                0.5003,
+                0.0,
+                0.6015
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
+        },
+        {
+            "name": "Mirror2",
+            "position": [
+                -0.2498,
+                0.4333,
+                0.6018
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
+        },
+        {
+            "name": "Mirror3",
+            "position": [
+                -0.2498,
+                -0.4333,
+                0.6018
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
+        }
+    ],
     "projectors": [
         {
-            "id": "proj1",
-            "position": [-3.0, 1.5, 1.2],     # Projector for screen1
-            "fov": 100.0                      # Horizontal field of view
+            "name": "Projector1",
+            "position": [
+                0.8,
+                0.001,
+                0.6
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
         },
         {
-            "id": "proj2",
-            "position": [-3.0, -1.5, 1.2],    # Projector for screen2
-            "fov": 100.0
+            "name": "Projector2",
+            "position": [
+                -0.4004,
+                0.6931,
+                0.6
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
         },
         {
-            "id": "proj3",
-            "position": [-3.0, 0.0, 2.0],     # Projector for screen3
-            "fov": 100.0
+            "name": "Projector3",
+            "position": [
+                -0.3995,
+                -0.6926,
+                0.6
+            ],
+            "forward": [
+                0.0,
+                0.0,
+                -1.0
+            ]
         }
     ],
-
-    "mirror": {
-        "enabled": True,
-        "center": [-1.5, 0.0, 1.5],           # Spherical mirror center
-        "radius": 0.6                        # Radius of curvature (convex)
-    }
+    "lights": [
+        {
+            "name": "Light1",
+            "position": [
+                0.8,
+                0.0,
+                0.6
+            ],
+            "forward": [
+                -1.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "Light2",
+            "position": [
+                -0.4,
+                0.6928,
+                0.6
+            ],
+            "forward": [
+                0.5,
+                -0.866,
+                0.0
+            ]
+        },
+        {
+            "name": "Light3",
+            "position": [
+                -0.4,
+                -0.6928,
+                0.6
+            ],
+            "forward": [
+                0.5,
+                0.866,
+                0.0
+            ]
+        }
+    ]
 }

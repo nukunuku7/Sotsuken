@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import numpy as np
 from datetime import datetime
 from PyQt5.QtGui import QGuiApplication
 
@@ -83,7 +84,7 @@ def load_points(display_name: str, mode: str = "perspective"):
 # === グリッド生成 ===
 def generate_grid_points(display_name: str, cols: int = 10, rows: int = 10) -> list:
     """
-    ディスプレイ全体をカバーする均等グリッドを生成。
+    画面中央20%サイズに寄せた均等グリッドを生成。
     出力は画面ピクセル単位。
     """
     app = QGuiApplication.instance() or QGuiApplication([])
@@ -95,18 +96,25 @@ def generate_grid_points(display_name: str, cols: int = 10, rows: int = 10) -> l
     else:
         w, h = 1920, 1080  # fallback
 
+    scale = 0.2
+    cx, cy = w / 2, h / 2
+    half_w, half_h = (w * scale) / 2, (h * scale) / 2
+    left, right = cx - half_w, cx + half_w
+    top, bottom = cy - half_h, cy + half_h
+
     points = []
-    for y in range(rows):
-        for x in range(cols):
-            px = x / (cols - 1) * w
-            py = y / (rows - 1) * h
-            points.append([px, py])
+    for j in range(rows):
+        y = top + (bottom - top) * (j / (rows - 1))
+        for i in range(cols):
+            x = left + (right - left) * (i / (cols - 1))
+            points.append([x, y])
     return points
+
 
 
 def generate_perspective_points(display_name: str) -> list:
     """
-    perspective（斜影変換）モードの初期4点を画面端に配置。
+    perspective（斜影変換）モードの初期4点を画面中央20%に寄せて配置。
     """
     app = QGuiApplication.instance() or QGuiApplication([])
     screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
@@ -117,40 +125,43 @@ def generate_perspective_points(display_name: str) -> list:
     else:
         w, h = 1920, 1080
 
+    scale = 0.2
+    cx, cy = w / 2, h / 2
+    half_w, half_h = (w * scale) / 2, (h * scale) / 2
+
     return [
-        [0, 0],        # 左上
-        [w, 0],        # 右上
-        [w, h],        # 右下
-        [0, h],        # 左下
+        [cx - half_w, cy - half_h],  # 左上
+        [cx + half_w, cy - half_h],  # 右上
+        [cx + half_w, cy + half_h],  # 右下
+        [cx - half_w, cy + half_h],  # 左下
     ]
 
 
 def create_display_grid(display_name: str, mode: str = "warp_map"):
-    """モード別にグリッドを生成して保存"""
+    """モード別にグリッドを生成して保存（重複した内部関数を削除して整理）"""
+    app = QGuiApplication.instance() or QGuiApplication([])
+    screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
+    if screen:
+        geo = screen.geometry()
+        w, h = geo.width(), geo.height()
+    else:
+        w, h = 1920, 1080
+
     if mode == "warp_map":
-        # 外周のみ（縦横10点分割）
-        app = QGuiApplication.instance() or QGuiApplication([])
-        screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
-        if screen:
-            geo = screen.geometry()
-            w, h = geo.width(), geo.height()
-        else:
-            w, h = 1920, 1080
+        # 画面中心寄りの外周（margin_ratio内側）に10分割点を生成
+        margin_ratio = 0.2
+        margin_x = w * margin_ratio
+        margin_y = h * margin_ratio
+        left, right = margin_x, w - margin_x
+        top, bottom = margin_y, h - margin_y
+        inner_w, inner_h = right - left, bottom - top
 
-        points = generate_perimeter_points(w, h, div=10)  # ← 外周のみ生成
-
+        # グローバルの generate_perimeter_points を再利用し、オフセットを加える
+        raw = generate_perimeter_points(inner_w, inner_h, div=10)
+        points = [[x + left, y + top] for x, y in raw]
     elif mode == "perspective":
         points = generate_perspective_points(display_name)
-
     else:
-        # その他（保険として）
-        app = QGuiApplication.instance() or QGuiApplication([])
-        screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
-        if screen:
-            geo = screen.geometry()
-            w, h = geo.width(), geo.height()
-        else:
-            w, h = 1920, 1080
         points = generate_perimeter_points(w, h, div=10)
 
     save_points(display_name, points, mode)
@@ -216,7 +227,6 @@ def auto_generate_from_environment(mode="warp_map", displays=None):
     for name in displays:
         create_display_grid(name, mode)
     print(f"🎉 選択ディスプレイ（{len(displays)}台）のグリッドを生成完了。")
-
 
 # === 動作テスト ===
 if __name__ == "__main__":

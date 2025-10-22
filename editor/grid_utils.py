@@ -125,7 +125,7 @@ def generate_perspective_points(display_name: str) -> list:
     else:
         w, h = 1920, 1080
 
-    scale = 0.2
+    scale = 0.1
     cx, cy = w / 2, h / 2
     half_w, half_h = (w * scale) / 2, (h * scale) / 2
 
@@ -149,7 +149,7 @@ def create_display_grid(display_name: str, mode: str = "warp_map"):
 
     if mode == "warp_map":
         # 画面中心寄りの外周（margin_ratio内側）に10分割点を生成
-        margin_ratio = 0.2
+        margin_ratio = 0.1
         margin_x = w * margin_ratio
         margin_y = h * margin_ratio
         left, right = margin_x, w - margin_x

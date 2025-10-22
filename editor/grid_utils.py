@@ -84,7 +84,7 @@ def load_points(display_name: str, mode: str = "perspective"):
 # === グリッド生成 ===
 def generate_grid_points(display_name: str, cols: int = 10, rows: int = 10) -> list:
     """
-    ディスプレイ全体をカバーする均等グリッドを生成。
+    画面中央20%サイズに寄せた均等グリッドを生成。
     出力は画面ピクセル単位。
     """
     app = QGuiApplication.instance() or QGuiApplication([])
@@ -96,18 +96,25 @@ def generate_grid_points(display_name: str, cols: int = 10, rows: int = 10) -> l
     else:
         w, h = 1920, 1080  # fallback
 
+    scale = 0.2
+    cx, cy = w / 2, h / 2
+    half_w, half_h = (w * scale) / 2, (h * scale) / 2
+    left, right = cx - half_w, cx + half_w
+    top, bottom = cy - half_h, cy + half_h
+
     points = []
-    for y in range(rows):
-        for x in range(cols):
-            px = x / (cols - 1) * w
-            py = y / (rows - 1) * h
-            points.append([px, py])
+    for j in range(rows):
+        y = top + (bottom - top) * (j / (rows - 1))
+        for i in range(cols):
+            x = left + (right - left) * (i / (cols - 1))
+            points.append([x, y])
     return points
+
 
 
 def generate_perspective_points(display_name: str) -> list:
     """
-    perspective（斜影変換）モードの初期4点を画面端に配置。
+    perspective（斜影変換）モードの初期4点を画面中央20%に寄せて配置。
     """
     app = QGuiApplication.instance() or QGuiApplication([])
     screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
@@ -118,40 +125,43 @@ def generate_perspective_points(display_name: str) -> list:
     else:
         w, h = 1920, 1080
 
+    scale = 0.2
+    cx, cy = w / 2, h / 2
+    half_w, half_h = (w * scale) / 2, (h * scale) / 2
+
     return [
-        [0, 0],        # 左上
-        [w, 0],        # 右上
-        [w, h],        # 右下
-        [0, h],        # 左下
+        [cx - half_w, cy - half_h],  # 左上
+        [cx + half_w, cy - half_h],  # 右上
+        [cx + half_w, cy + half_h],  # 右下
+        [cx - half_w, cy + half_h],  # 左下
     ]
 
 
 def create_display_grid(display_name: str, mode: str = "warp_map"):
-    """モード別にグリッドを生成して保存"""
+    """モード別にグリッドを生成して保存（重複した内部関数を削除して整理）"""
+    app = QGuiApplication.instance() or QGuiApplication([])
+    screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
+    if screen:
+        geo = screen.geometry()
+        w, h = geo.width(), geo.height()
+    else:
+        w, h = 1920, 1080
+
     if mode == "warp_map":
-        # 外周のみ（縦横10点分割）
-        app = QGuiApplication.instance() or QGuiApplication([])
-        screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
-        if screen:
-            geo = screen.geometry()
-            w, h = geo.width(), geo.height()
-        else:
-            w, h = 1920, 1080
+        # 画面中心寄りの外周（margin_ratio内側）に10分割点を生成
+        margin_ratio = 0.2
+        margin_x = w * margin_ratio
+        margin_y = h * margin_ratio
+        left, right = margin_x, w - margin_x
+        top, bottom = margin_y, h - margin_y
+        inner_w, inner_h = right - left, bottom - top
 
-        points = generate_perimeter_points(w, h, div=10)  # ← 外周のみ生成
-
+        # グローバルの generate_perimeter_points を再利用し、オフセットを加える
+        raw = generate_perimeter_points(inner_w, inner_h, div=10)
+        points = [[x + left, y + top] for x, y in raw]
     elif mode == "perspective":
         points = generate_perspective_points(display_name)
-
     else:
-        # その他（保険として）
-        app = QGuiApplication.instance() or QGuiApplication([])
-        screen = next((s for s in QGuiApplication.screens() if s.name() == display_name), None)
-        if screen:
-            geo = screen.geometry()
-            w, h = geo.width(), geo.height()
-        else:
-            w, h = 1920, 1080
         points = generate_perimeter_points(w, h, div=10)
 
     save_points(display_name, points, mode)
@@ -217,83 +227,6 @@ def auto_generate_from_environment(mode="warp_map", displays=None):
     for name in displays:
         create_display_grid(name, mode)
     print(f"🎉 選択ディスプレイ（{len(displays)}台）のグリッドを生成完了。")
-
-# === 凸面鏡ワープマップ生成 ===
-def generate_mirror_warp_map(projector, mirror, screen, resolution=(1920, 1080),
-                             mirror_radius=0.2475, screen_radius=2.204, screen_center_height=1.650):
-    """
-    凸面鏡反射を考慮してプロジェクター→スクリーン間のwarp_mapを生成する。
-    - projector, mirror, screen: dict {"position": [x,y,z], "forward": [x,y,z]}
-    - resolution: 出力画像の解像度 (width, height)
-    - mirror_radius: 凸面鏡半径 [m]（例: 直径495mmの1/4球 → 半径0.2475m）
-    - screen_radius: スクリーン半径 [m]
-    - screen_center_height: スクリーン中心高さ [m]
-
-    戻り値:
-        map_x, map_y : np.float32
-    """
-
-    width, height = resolution
-    px, py, pz = projector["position"]
-    mx, my, mz = mirror["position"]
-    sx, sy, sz = screen["position"]
-
-    # 座標系: スクリーン中心を原点、Z方向が前方（視線方向）
-    # 画素グリッドを生成（プロジェクター側から見た像）
-    x = np.linspace(-1, 1, width)
-    y = np.linspace(-1, 1, height)
-    xv, yv = np.meshgrid(x, y)
-
-    # プロジェクター空間上の仮想視線ベクトル
-    rays = np.stack([xv, -yv, np.ones_like(xv)], axis=-1)
-    rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
-
-    # プロジェクター位置ベクトル
-    proj_pos = np.array([px, py, pz])
-    mirror_pos = np.array([mx, my, mz])
-
-    # 鏡面の法線方向を設定（Z軸向き）
-    mirror_normal = np.array([0, 0, -1])
-
-    # 凸面鏡の反射点を近似的に計算
-    # → 投影ベクトルを鏡面上に伸ばして反射方向を求める
-    t = np.dot(mirror_normal, mirror_pos - proj_pos) / np.dot(mirror_normal, rays)
-    hit_points = proj_pos + rays * t[..., np.newaxis]
-
-    # 鏡面上の法線（球の中心を原点とした法線ベクトル）
-    mirror_center = mirror_pos - mirror_normal * mirror_radius
-    normal_vecs = hit_points - mirror_center
-    normal_vecs /= np.linalg.norm(normal_vecs, axis=-1, keepdims=True)
-
-    # 反射ベクトル
-    reflect_rays = rays - 2 * np.sum(rays * normal_vecs, axis=-1, keepdims=True) * normal_vecs
-
-    # 反射後にスクリーン（Z=0 近辺）と交差する点を求める
-    # ここではスクリーンを球面（半径 screen_radius）として近似
-    screen_center = np.array([0, 0, screen_center_height])
-    A = np.sum(reflect_rays**2, axis=-1)
-    B = 2 * np.sum((hit_points - screen_center) * reflect_rays, axis=-1)
-    C = np.sum((hit_points - screen_center)**2, axis=-1) - screen_radius**2
-
-    # 二次方程式を解いて交点距離 t2 を求める
-    discriminant = B**2 - 4 * A * C
-    t2 = np.where(discriminant > 0, (-B + np.sqrt(discriminant)) / (2 * A), np.nan)
-    screen_points = hit_points + reflect_rays * t2[..., np.newaxis]
-
-    # 交点をスクリーン平面上の座標に射影
-    # ここではθφ座標（緯度経度）に変換して正規化する
-    rel = screen_points - screen_center
-    theta = np.arctan2(rel[..., 0], rel[..., 2])  # 横方向角度
-    phi = np.arctan2(rel[..., 1], np.sqrt(rel[..., 0]**2 + rel[..., 2]**2))  # 縦方向角度
-
-    # θφをピクセル座標にマッピング
-    map_x = (theta - theta.min()) / (theta.max() - theta.min()) * width
-    map_y = (phi - phi.min()) / (phi.max() - phi.min()) * height
-
-    map_x = np.nan_to_num(map_x).astype(np.float32)
-    map_y = np.nan_to_num(map_y).astype(np.float32)
-
-    return map_x, map_y
 
 # === 動作テスト ===
 if __name__ == "__main__":

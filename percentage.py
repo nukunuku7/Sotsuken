@@ -1,3 +1,27 @@
+'''
+このプログラムは、config/projector_profilesディレクトリ内のグリッドJSONファイル
+を読み込み、FHD(1920x1080)に対するポリゴン面積の割合（pixel usage percentage）
+を計算します。メインシステムとは別で動作し、独立したユーティリティとして使用されます。
+使用方法:
+    ・vscode内の右上の「Run Python File」ボタンを押すだけで実行するか、powershell
+    内で「python Sotsuken/percentage.py」と入力して実行します。
+
+出力例:
+    📊 Pixel Usage Percentage Calculator
+    ------------------------------------
+    grid1.json                             → 75.34% pixel usage
+    grid2.json                             → 50.12% pixel usage
+    ...
+
+注意:
+    ・グリッドJSONは2つの形式に対応しています。
+        ① list形式: [[x, y], [x, y], ...]
+        ② dict形式: {"points": [{"x": ..., "y": ...}, ...]}
+    ・未対応の形式の場合、警告メッセージが表示されます。
+    ・FHD以外の解像度には対応していません。←拡張可能
+
+'''
+
 import os
 import json
 import glob

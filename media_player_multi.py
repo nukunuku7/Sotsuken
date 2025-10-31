@@ -10,13 +10,14 @@ from warp_engine import warp_image, prepare_warp
 
 
 class DisplayWindow(QWidget):
-    def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size):
+    def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size, fade_enabled=False):
         super().__init__()
         self.setWindowFlag(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
         self.source_screen = source_screen
         self.target_screen = target_screen
+        self.fade_enabled = fade_enabled
         self.mode = mode
         self.offset_x = offset_x
         self.virtual_size = virtual_size  # (total_width, height)
@@ -70,6 +71,39 @@ class DisplayWindow(QWidget):
         if warped is None:
             return
 
+        # 複数台ならフェード適用
+        if warped is not None and self.fade_enabled:
+            h, w = warped.shape[:2]
+            fade = np.ones((h, w), dtype=np.float32)
+
+            # warp_map 用はマスクから、perspective 用は矩形範囲から左右フェード
+            if self.mode == "warp_map":
+                mask = np.zeros((h, w), dtype=np.uint8)
+                pts = np.array(self.warp_info.get("map_x", []), dtype=np.int32)
+                if pts.size > 0:
+                    cv2.fillPoly(mask, [pts], 255)
+                    x_indices = np.where(mask > 0)[1]
+                    if len(x_indices) > 0:
+                        x_min, x_max = x_indices.min(), x_indices.max()
+                        blend_w = max(int((x_max - x_min) * 0.1), 1)
+                        for x in range(blend_w):
+                            alpha = x / float(blend_w)
+                            fade[:, x_min + x] *= alpha
+                            fade[:, x_max - x] *= alpha
+                    fade[mask == 0] = 0.0
+            elif self.mode == "perspective":
+                pts = np.array(self.warp_info.get("matrix", []), dtype=np.float32)
+                if pts.size >= 4:
+                    x_coords = pts[:,0]
+                    x_min, x_max = int(x_coords.min()), int(x_coords.max())
+                    blend_w = max(int((x_max - x_min) * 0.1), 1)
+                    for x in range(blend_w):
+                        alpha = x / float(blend_w)
+                        fade[:, x_min + x] *= alpha
+                        fade[:, x_max - x] *= alpha
+
+            warped = (warped.astype(np.float32) * fade[..., None]).astype(np.uint8)
+
         h, w, ch = warped.shape
         bytes_per_line = ch * w
         qt_image = QImage(warped.data, w, h, bytes_per_line, QImage.Format_RGB888)
@@ -106,9 +140,10 @@ def main():
         target_screen = screens[name]
         print(f"🎥 {args.source} → {name} に補正出力します (モード: {args.mode}) [offset={offset_x}]")
 
+        fade_enabled = len(args.targets) > 1
         window = DisplayWindow(
             source_screen, target_screen, args.mode,
-            offset_x, virtual_size
+            offset_x, virtual_size, fade_enabled=fade_enabled
         )
         windows.append(window)
         offset_x += target_screen.geometry().width()

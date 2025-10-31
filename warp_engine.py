@@ -4,20 +4,9 @@ import numpy as np
 import cv2
 from editor.grid_utils import load_points, log
 
-BLEND_WIDTH_RATIO = 0.1
 warp_cache = {}
 
-def generate_fade_mask(w, h):
-    fade = np.ones((h, w), dtype=np.float32)
-    blend_w = int(w * BLEND_WIDTH_RATIO)
-    if blend_w <= 0:
-        return fade
-    for x in range(blend_w):
-        alpha = x / float(blend_w)
-        fade[:, x] *= alpha
-        fade[:, w - 1 - x] *= alpha
-    return fade
-
+# --- 射影行列生成 ---
 def generate_perspective_matrix(src_size, dst_points):
     w, h = src_size
     if len(dst_points) != 4:
@@ -26,6 +15,7 @@ def generate_perspective_matrix(src_size, dst_points):
     dst_pts = np.array(dst_points, dtype=np.float32)
     return cv2.getPerspectiveTransform(src_pts, dst_pts)
 
+# --- warp 準備 ---
 def prepare_warp(display_name, mode, src_size):
     cache_key = (display_name, mode, src_size)
     if cache_key in warp_cache:
@@ -41,8 +31,7 @@ def prepare_warp(display_name, mode, src_size):
 
     if mode == "perspective":
         matrix = generate_perspective_matrix((w, h), pts[:4])
-        fade = generate_fade_mask(w, h)
-        warp_cache[cache_key] = {"mode": mode, "matrix": matrix, "fade": fade}
+        warp_cache[cache_key] = {"mode": mode, "matrix": matrix}
         log(f"[OK] 射影変換を準備: {display_name}")
         return warp_cache[cache_key]
 
@@ -55,13 +44,13 @@ def prepare_warp(display_name, mode, src_size):
         outside = (mask == 0)
         map_x[outside] = 0.0
         map_y[outside] = 0.0
-        fade = generate_fade_mask(w, h)
-        warp_cache[cache_key] = {"mode": mode, "map_x": map_x, "map_y": map_y, "fade": fade}
+        warp_cache[cache_key] = {"mode": mode, "map_x": map_x, "map_y": map_y}
         log(f"[OK] warp_map を準備: {display_name}")
         return warp_cache[cache_key]
 
     return None
 
+# --- warp 適用 ---
 def warp_image(image, warp_info):
     if image is None or warp_info is None:
         return image
@@ -77,12 +66,6 @@ def warp_image(image, warp_info):
                                borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
         else:
             return image
-
-        fade = warp_info.get("fade")
-        if fade is not None:
-            if fade.shape != (h, w):
-                fade = cv2.resize(fade, (w, h))
-            warped = (warped.astype(np.float32) * fade[..., None]).astype(np.uint8)
 
         return warped
 

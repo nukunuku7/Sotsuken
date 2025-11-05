@@ -1,3 +1,5 @@
+# grid_editor_perspective.py
+
 import argparse
 import tkinter as tk
 import json

@@ -22,7 +22,6 @@ from editor.grid_utils import (
 )
 
 POINT_RADIUS = 6
-GRID_DIV = 10
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
@@ -31,11 +30,9 @@ class EditorCanvas(tk.Canvas):
         self.w, self.h = width, height
         self.points = self.load_initial_points()
         self.dragging_point = None
-
         self.bind("<ButtonPress-1>", self.on_press)
         self.bind("<B1-Motion>", self.on_drag)
         self.bind("<ButtonRelease-1>", self.on_release)
-
         self.draw()
 
     def draw(self):
@@ -43,8 +40,7 @@ class EditorCanvas(tk.Canvas):
         for i in range(len(self.points)):
             x, y = self.points[i]
             self.create_oval(x - POINT_RADIUS, y - POINT_RADIUS,
-                             x + POINT_RADIUS, y + POINT_RADIUS,
-                             fill="red")
+                             x + POINT_RADIUS, y + POINT_RADIUS, fill="red")
             x2, y2 = self.points[(i + 1) % len(self.points)]
             self.create_line(x, y, x2, y2, fill="green", width=2)
 
@@ -84,8 +80,8 @@ def main():
 
     root = tk.Tk()
     root.geometry(f"{args.w}x{args.h}+{args.x}+{args.y}")
-    root.overrideredirect(True)  # 🔹タイトルバーなどを非表示
-    root.bind("<Escape>", lambda e: root.destroy())  # 🔹Escで閉じる
+    root.overrideredirect(True)
+    root.bind("<Escape>", lambda e: root.destroy())
 
     frame = tk.Frame(root)
     frame.pack(fill="both", expand=True)
@@ -93,10 +89,7 @@ def main():
     canvas = EditorCanvas(frame, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
 
-    # --- 🔒 ロックファイル監視スレッド ---
     lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(args.display, 'warp_map')}.lock")
-
-    # 起動時にロックファイルを作成
     with open(lock_path, "w") as f:
         f.write("active")
 
@@ -104,16 +97,12 @@ def main():
         while True:
             time.sleep(0.5)
             if not os.path.exists(lock_path):
-                # ロックファイル削除を検知 → 自動保存して終了
-                try:
-                    canvas.save()
-                finally:
-                    root.destroy()
+                canvas.save()
+                root.destroy()
                 break
 
     threading.Thread(target=watch_lock, daemon=True).start()
     root.mainloop()
-
 
 if __name__ == "__main__":
     main()

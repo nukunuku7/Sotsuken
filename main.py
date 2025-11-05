@@ -1,4 +1,4 @@
-# main.py（修正版：チェック付きディスプレイのみ保存）
+# main.py（blend自動判定付き）
 
 import sys
 import os
@@ -14,34 +14,41 @@ from PyQt5.QtCore import Qt
 
 from editor.grid_utils import sanitize_filename, auto_generate_from_environment
 
-# 設定ファイルの指定
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # main.py のあるディレクトリ
-CONFIG_DIR = os.path.join(BASE_DIR, "config") # configディレクトリ
-SETTINGS_DIR = os.path.join(CONFIG_DIR, "projector_profiles") # projector_profilesディレクトリ
-TEMP_DIR = os.path.join(BASE_DIR, "temp") # tempディレクトリ
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_DIR = os.path.join(BASE_DIR, "config")
+SETTINGS_DIR = os.path.join(CONFIG_DIR, "projector_profiles")
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
 
-os.makedirs(SETTINGS_DIR, exist_ok=True) # ディレクトリがなければ作成
-os.makedirs(TEMP_DIR, exist_ok=True) # ディレクトリがなければ作成
+os.makedirs(SETTINGS_DIR, exist_ok=True)
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-EDIT_PROFILE_PATH = os.path.join(CONFIG_DIR, "edit_profile.json") # 編集用プロファイル保存パス
+EDIT_PROFILE_PATH = os.path.join(CONFIG_DIR, "edit_profile.json")
 
 
-# --- 編集用ディスプレイ関係 ---
-def save_edit_profile(display_name): # 編集用ディスプレイ名を保存
+def save_edit_profile(display_name):
     with open(EDIT_PROFILE_PATH, "w") as f:
         json.dump({"display": display_name}, f)
 
 
-def load_edit_profile(): # 編集用ディスプレイ名を読み込み
+def load_edit_profile():
     if os.path.exists(EDIT_PROFILE_PATH):
         with open(EDIT_PROFILE_PATH, "r") as f:
             return json.load(f).get("display")
     return None
 
 
-# --- メインウィンドウ ---
+# --- ディスプレイの実機配置とPyQt名のマッピング ---
+# Windows上の並び：4(左端) → 3 → 2 → 1(右端)
+DISPLAY_MAPPING = {
+    "1": r"\\.\DISPLAY1",
+    "2": r"\\.\DISPLAY3",
+    "3": r"\\.\DISPLAY2",
+    "4": r"\\.\DISPLAY4"
+}
+
+
 class MainWindow(QMainWindow):
-    def __init__(self): # タイトル設定、レイアウト設定
+    def __init__(self):
         super().__init__()
         self.setWindowTitle("360°歪み補正プロジェクションシステム")
         self.setGeometry(200, 200, 480, 400)
@@ -76,23 +83,26 @@ class MainWindow(QMainWindow):
         self.init_display_info()
         self.init_projector_list()
 
-    def init_display_info(self): # 編集用ディスプレイの初期化
+    def init_display_info(self):
         screen = QGuiApplication.primaryScreen()
         self.edit_display_name = screen.name()
         self.label.setText(f"編集用ディスプレイ：{self.edit_display_name}")
         save_edit_profile(self.edit_display_name)
 
-    def init_projector_list(self): # 出力先ディスプレイの初期化
-        screens = QGuiApplication.screens()
-        for screen in screens:
-            if screen.name() == self.edit_display_name:
+    def init_projector_list(self):
+        """Windows番号順でリストを作成"""
+        self.projector_list.clear()
+        for win_id, pyqt_name in DISPLAY_MAPPING.items():
+            # 編集用ディスプレイは除外
+            if pyqt_name == self.edit_display_name:
                 continue
-            item = QListWidgetItem(screen.name())
+            item = QListWidgetItem(f"ディスプレイ{win_id} ({pyqt_name})")
+            item.setData(Qt.UserRole, pyqt_name)  # 内部データとしてPyQt名を保持
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
             self.projector_list.addItem(item)
 
-    def launch_instruction_window(self, mode): # 保存操作ガイドの表示
+    def launch_instruction_window(self, mode):
         geom = None
         for screen in QGuiApplication.screens():
             if screen.name() == self.edit_display_name:
@@ -130,32 +140,40 @@ class MainWindow(QMainWindow):
         auto_generate_from_environment(mode=mode)
         self.launch_instruction_window(mode)
 
-        screens = QGuiApplication.screens()
-        for screen in screens:
-            if screen.name() == self.edit_display_name:
-                continue
-            geom = screen.geometry()
-            script_path = os.path.join(BASE_DIR, "editor",
-                "grid_editor_perspective.py" if mode == "perspective" else "grid_editor_warpmap.py"
-            )
-            lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(screen.name(), mode)}.lock")
-            with open(lock_path, "w") as f:
-                f.write("active")
+        # ✅ チェックされたディスプレイだけ起動
+        for i in range(self.projector_list.count()):
+            item = self.projector_list.item(i)
+            if item.checkState() == Qt.Checked:
+                pyqt_name = item.data(Qt.UserRole)
+                geom = None
+                for screen in QGuiApplication.screens():
+                    if screen.name() == pyqt_name:
+                        geom = screen.geometry()
+                        break
+                if geom is None:
+                    continue
 
-            cmd = [
-                sys.executable, script_path,
-                "--display", screen.name(),
-                "--x", str(geom.x()), "--y", str(geom.y()),
-                "--w", str(geom.width()), "--h", str(geom.height())
-            ]
-            subprocess.Popen(cmd)
+                script_path = os.path.join(BASE_DIR, "editor",
+                    "grid_editor_perspective.py" if mode == "perspective" else "grid_editor_warpmap.py"
+                )
+                lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(pyqt_name, mode)}.lock")
+                with open(lock_path, "w") as f:
+                    f.write("active")
 
-    def force_save_grids(self, mode): # チェック済みディスプレイのグリッドを保存
+                cmd = [
+                    sys.executable, script_path,
+                    "--display", pyqt_name,
+                    "--x", str(geom.x()), "--y", str(geom.y()),
+                    "--w", str(geom.width()), "--h", str(geom.height())
+                ]
+                subprocess.Popen(cmd)
+
+    def force_save_grids(self, mode):
         selected_names = []
         for i in range(self.projector_list.count()):
             item = self.projector_list.item(i)
-            if item.checkState():
-                selected_names.append(item.text())
+            if item.checkState() == Qt.Checked:
+                selected_names.append(item.data(Qt.UserRole))
 
         if not selected_names:
             QMessageBox.warning(self, "警告", "保存対象のディスプレイが選択されていません")
@@ -164,7 +182,6 @@ class MainWindow(QMainWindow):
         from editor.grid_utils import auto_generate_from_environment
         auto_generate_from_environment(mode=mode, displays=selected_names)
 
-        # 🔽 ロックファイル削除（＝終了トリガー送信）
         for name in selected_names:
             lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(name, mode)}.lock")
             if os.path.exists(lock_path):
@@ -175,34 +192,47 @@ class MainWindow(QMainWindow):
             f"モード '{mode}' のグリッドを {', '.join(selected_names)} に保存しました。"
         )
 
-    def launch_correction_display(self):  # 補正表示の起動
+    def launch_correction_display(self):
         selected_names = []
         for i in range(self.projector_list.count()):
             item = self.projector_list.item(i)
-            if item.checkState():
-                selected_names.append(item.text())
+            if item.checkState() == Qt.Checked:
+                selected_names.append(item.data(Qt.UserRole))
 
         if not selected_names:
             QMessageBox.warning(self, "警告", "出力先ディスプレイが選択されていません")
             return
 
         mode = self.mode_selector.currentText()
-        source_display = self.edit_display_name  # 編集用ディスプレイをソースにする
+        source_display = self.edit_display_name
 
         cmd = [
             sys.executable,
             os.path.join(BASE_DIR, "media_player_multi.py"),
             "--source", source_display,
             "--targets", *selected_names,
-            "--mode", mode
+            "--mode", mode,
         ]
-        subprocess.Popen(cmd)
 
+        # ✅ 複数ディスプレイならブレンド有効化
+        if len(selected_names) > 1:
+            cmd.append("--blend")
+
+        subprocess.Popen(cmd)
 
 
 # --- アプリ起動 ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # --- 起動時デバッグ出力 ---
+    print("=== Display Mapping ===")
+    screens = QGuiApplication.screens()
+    for i, s in enumerate(screens):
+        g = s.geometry()
+        print(f"[{i}] {s.name()} : {g.width()}x{g.height()} at ({g.x()},{g.y()})")
+    print("========================")
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())

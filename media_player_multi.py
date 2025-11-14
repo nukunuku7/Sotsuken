@@ -6,31 +6,34 @@ import mss
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget
 from PyQt5.QtGui import QImage, QPixmap, QGuiApplication
 from PyQt5.QtCore import QTimer, Qt
+
+from editor.grid_utils import load_points, log
 from warp_engine import warp_image, prepare_warp
 
 
 class DisplayWindow(QWidget):
-    def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size, fade_enabled=False):
+    def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size,
+                 warp_info_all=None, fade_enabled=False):
         super().__init__()
         self.setWindowFlag(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
         self.source_screen = source_screen
         self.target_screen = target_screen
-        self.fade_enabled = fade_enabled
         self.mode = mode
         self.offset_x = offset_x
-        self.virtual_size = virtual_size  # (total_width, height)
+        self.virtual_size = virtual_size
+        self.fade_enabled = fade_enabled
+        self.warp_info = warp_info_all
 
-        geom_src = source_screen.geometry()
         geom_tgt = target_screen.geometry()
         self.setGeometry(geom_tgt)
-
         self.label = QLabel(self)
         self.label.setGeometry(0, 0, geom_tgt.width(), geom_tgt.height())
 
-        # MSSによるキャプチャ設定（ソース全体キャプチャ）
+        # キャプチャ設定
         self.sct = mss.mss()
+        geom_src = source_screen.geometry()
         self.mon = {
             "left": geom_src.x(),
             "top": geom_src.y(),
@@ -38,12 +41,26 @@ class DisplayWindow(QWidget):
             "height": geom_src.height()
         }
 
-        # warp情報を初期化
-        self.warp_info = prepare_warp(
-            target_screen.name(),
-            self.mode,
-            (geom_tgt.width(), geom_tgt.height())
-        )
+        # グリッドをロード
+        points_local = load_points(target_screen.name(), mode)
+        if not points_local:
+            log(f"[WARN] グリッドが存在しないためスキップ: {target_screen.name()}")
+            self.warp_info = None
+        else:
+            total_w, total_h = virtual_size
+            adjusted_points = []
+            for p in points_local:
+                x_adj = p[0] + self.offset_x
+                y_adj = p[1]
+                adjusted_points.append([x_adj, y_adj])
+
+            self.warp_info = prepare_warp(
+                display_name=target_screen.name(),
+                mode=self.mode,
+                src_size=(geom_tgt.width(), geom_tgt.height()),
+                load_points_func=lambda *_: adjusted_points,
+                log_func=log
+            )
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
@@ -55,55 +72,43 @@ class DisplayWindow(QWidget):
         if raw is None or raw.size == 0:
             return
 
-        frame = raw[:, :, :3]
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # 仮想ワイド画面対応：全体から自分の領域を切り出す
+        frame = cv2.cvtColor(raw[:, :, :3], cv2.COLOR_BGR2RGB)
         total_w, total_h = self.virtual_size
         geom_tgt = self.target_screen.geometry()
-        part_width = geom_tgt.width()
-        x_start = int((self.offset_x / total_w) * frame.shape[1])
-        x_end = int(((self.offset_x + part_width) / total_w) * frame.shape[1])
+        part_w, part_h = geom_tgt.width(), geom_tgt.height()
+
+        # === 🎯 キャプチャ範囲：自分の担当 + 両端10%の重なり部分 ===
+        blend_ratio = 0.10
+        overlap_px = int(part_w * blend_ratio)
+        x_start = int((self.offset_x / total_w) * frame.shape[1]) - overlap_px
+        x_end = int(((self.offset_x + part_w) / total_w) * frame.shape[1]) + overlap_px
+
+        x_start = max(0, x_start)
+        x_end = min(frame.shape[1], x_end)
         sub_frame = frame[:, x_start:x_end]
 
-        # warp適用
-        warped = warp_image(sub_frame, warp_info=self.warp_info)
+        # === 🎯 sub_frame を FHD にフィットさせる ===
+        resized = cv2.resize(sub_frame, (part_w, part_h), interpolation=cv2.INTER_LINEAR)
+
+        # === 🎯 歪み補正 ===
+        warped = warp_image(resized, warp_info=self.warp_info)
         if warped is None:
             return
 
-        # 複数台ならフェード適用
-        if warped is not None and self.fade_enabled:
+        # === 🎨 フェードマスクで両端をブレンド ===
+        if self.fade_enabled:
             h, w = warped.shape[:2]
             fade = np.ones((h, w), dtype=np.float32)
+            blend_w = int(w * 0.10)
 
-            # warp_map 用はマスクから、perspective 用は矩形範囲から左右フェード
-            if self.mode == "warp_map":
-                mask = np.zeros((h, w), dtype=np.uint8)
-                pts = np.array(self.warp_info.get("map_x", []), dtype=np.int32)
-                if pts.size > 0:
-                    cv2.fillPoly(mask, [pts], 255)
-                    x_indices = np.where(mask > 0)[1]
-                    if len(x_indices) > 0:
-                        x_min, x_max = x_indices.min(), x_indices.max()
-                        blend_w = max(int((x_max - x_min) * 0.1), 1)
-                        for x in range(blend_w):
-                            alpha = x / float(blend_w)
-                            fade[:, x_min + x] *= alpha
-                            fade[:, x_max - x] *= alpha
-                    fade[mask == 0] = 0.0
-            elif self.mode == "perspective":
-                pts = np.array(self.warp_info.get("matrix", []), dtype=np.float32)
-                if pts.size >= 4:
-                    x_coords = pts[:,0]
-                    x_min, x_max = int(x_coords.min()), int(x_coords.max())
-                    blend_w = max(int((x_max - x_min) * 0.1), 1)
-                    for x in range(blend_w):
-                        alpha = x / float(blend_w)
-                        fade[:, x_min + x] *= alpha
-                        fade[:, x_max - x] *= alpha
+            for x in range(blend_w):
+                alpha = x / float(blend_w)
+                fade[:, x] *= alpha           # 左端フェードアウト
+                fade[:, -x - 1] *= alpha      # 右端フェードアウト
 
             warped = (warped.astype(np.float32) * fade[..., None]).astype(np.uint8)
 
+        # === 🎥 出力 ===
         h, w, ch = warped.shape
         bytes_per_line = ch * w
         qt_image = QImage(warped.data, w, h, bytes_per_line, QImage.Format_RGB888)
@@ -112,9 +117,10 @@ class DisplayWindow(QWidget):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, help="キャプチャ元ディスプレイ名")
-    parser.add_argument("--targets", nargs="+", required=True, help="補正出力先ディスプレイ名（複数可）")
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--targets", nargs="+", required=True)
     parser.add_argument("--mode", choices=["perspective", "warp_map"], default="perspective")
+    parser.add_argument("--blend", action="store_true", help="Enable alpha blending")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -138,12 +144,23 @@ def main():
             continue
 
         target_screen = screens[name]
-        print(f"🎥 {args.source} → {name} に補正出力します (モード: {args.mode}) [offset={offset_x}]")
+        fade_enabled = args.blend and len(args.targets) > 1
 
-        fade_enabled = len(args.targets) > 1
+        warp_info = prepare_warp(name, args.mode,
+                                 (target_screen.geometry().width(), target_screen.geometry().height()),
+                                 load_points_func=load_points, log_func=log)
+
+        if warp_info is None:
+            print(f"⚠️ {name} の warp 情報がありません。スキップします。")
+            continue
+
+        print(f"🎥 {args.source} → {name} 出力 (fade={fade_enabled})")
+
         window = DisplayWindow(
             source_screen, target_screen, args.mode,
-            offset_x, virtual_size, fade_enabled=fade_enabled
+            offset_x, virtual_size,
+            warp_info_all=warp_info,
+            fade_enabled=fade_enabled
         )
         windows.append(window)
         offset_x += target_screen.geometry().width()

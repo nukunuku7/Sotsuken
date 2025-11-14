@@ -1,8 +1,8 @@
+# warp_engine.py
 import os
 import json
 import numpy as np
 import cv2
-from editor.grid_utils import load_points, log
 
 warp_cache = {}
 
@@ -15,15 +15,35 @@ def generate_perspective_matrix(src_size, dst_points):
     dst_pts = np.array(dst_points, dtype=np.float32)
     return cv2.getPerspectiveTransform(src_pts, dst_pts)
 
+
 # --- warp 準備 ---
-def prepare_warp(display_name, mode, src_size):
+def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
+    """warp情報を生成。load_points_func と log_func を外部から渡せるようにする"""
+    def _log(msg):
+        if log_func:
+            log_func(msg)
+        else:
+            print(msg)
+
+    def _load_points(name, mode):
+        if load_points_func:
+            return load_points_func(name, mode)
+        else:
+            # editor ではなく config/projector_profiles 内を参照
+            json_path = os.path.join("config", "projector_profiles", f"__._{name}_{mode}_points.json")
+            if not os.path.exists(json_path):
+                print(f"[WARN] グリッドファイルが見つかりません: {json_path}")
+                return None
+            with open(json_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
     cache_key = (display_name, mode, src_size)
     if cache_key in warp_cache:
         return warp_cache[cache_key]
 
-    points = load_points(display_name, mode)
+    points = _load_points(display_name, mode)
     if points is None or len(points) < 4:
-        log(f"[WARN] グリッド点が不足または存在しません: {display_name} ({mode})")
+        _log(f"[WARN] グリッド点が不足または存在しません: {display_name} ({mode})")
         return None
 
     pts = np.array(points, dtype=np.float32)
@@ -32,7 +52,7 @@ def prepare_warp(display_name, mode, src_size):
     if mode == "perspective":
         matrix = generate_perspective_matrix((w, h), pts[:4])
         warp_cache[cache_key] = {"mode": mode, "matrix": matrix}
-        log(f"[OK] 射影変換を準備: {display_name}")
+        _log(f"[OK] 射影変換を準備: {display_name}")
         return warp_cache[cache_key]
 
     elif mode == "warp_map":
@@ -45,13 +65,14 @@ def prepare_warp(display_name, mode, src_size):
         map_x[outside] = 0.0
         map_y[outside] = 0.0
         warp_cache[cache_key] = {"mode": mode, "map_x": map_x, "map_y": map_y}
-        log(f"[OK] warp_map を準備: {display_name}")
+        _log(f"[OK] warp_map を準備: {display_name}")
         return warp_cache[cache_key]
 
     return None
 
+
 # --- warp 適用 ---
-def warp_image(image, warp_info):
+def warp_image(image, warp_info, log_func=None):
     if image is None or warp_info is None:
         return image
 
@@ -66,9 +87,11 @@ def warp_image(image, warp_info):
                                borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
         else:
             return image
-
         return warped
 
     except Exception as e:
-        log(f"[ERROR] warp_image 失敗: {e}")
+        if "log_func" in locals():
+            log_func(f"[ERROR] warp_image 失敗: {e}")
+        else:
+            print(f"[ERROR] warp_image 失敗: {e}")
         return image

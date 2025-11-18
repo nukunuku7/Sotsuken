@@ -199,12 +199,35 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         _log("[WARN] incomplete sim set (need projector/mirror/screen)", log_func)
         return None
 
-    # projector origin, direction, FOV, resolution
+        # projector origin, direction, FOV, resolution
     proj_origin = np.array(proj["origin"], dtype=np.float64)
     proj_dir = _normalize(np.array(proj["direction"], dtype=np.float64))
     fov_h = float(proj.get("fov_h", 53.13))
     fov_v = float(proj.get("fov_v", fov_h))
     proj_resolution = tuple(proj.get("resolution", [int(src_size[0]), int(src_size[1])]))
+
+    # --- ★ 垂直キーストーン補正を追加（degrees） ---
+    keystone_v = float(proj.get("keystone_v", 0.0))
+    if abs(keystone_v) > 1e-6:
+        # projector image plane basis (right & up)
+        default_up = np.array([0.0, 0.0, 1.0])
+        if abs(np.dot(default_up, proj_dir)) > 0.99:
+            default_up = np.array([0.0, 1.0, 0.0])
+        right = _normalize(np.cross(proj_dir, default_up))
+        up = _normalize(np.cross(right, proj_dir))
+
+        # rotate proj_dir around "right" axis by keystone angle
+        theta = math.radians(keystone_v)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+
+        # Rodrigues rotation formula
+        proj_dir = _normalize(
+            proj_dir * cos_t +
+            np.cross(right, proj_dir) * sin_t +
+            right * np.dot(right, proj_dir) * (1 - cos_t)
+        )
+        _log(f"[keystone] vertical keystone applied: {keystone_v} deg", log_func)
 
     # mirror point cloud & screen point cloud
     mirror_pts = np.array(mirror.get("vertices", []), dtype=np.float64)

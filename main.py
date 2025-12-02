@@ -1,4 +1,8 @@
 # main.py（blend自動判定付き）
+# ==============================
+# 仮想環境有効かコマンド
+# sovenv\Scripts\activate
+# ==============================
 
 import sys
 import os

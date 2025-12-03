@@ -1,0 +1,10 @@
+[project]
+name = "Sotsuken"
+version = "0.1.0"
+requires-python = ">=3.9,<3.10"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "mss",
+    "pyqt5==5.15.7"
+]

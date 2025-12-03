@@ -6,5 +6,4 @@ dependencies = [
     "numpy",
     "opencv-python",
     "mss",
-    "pyqt5==5.15.7"
 ]

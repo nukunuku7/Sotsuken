@@ -51,44 +51,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pyqt5"
-version = "5.15.7"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyqt5-qt5" },
-    { name = "pyqt5-sip" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e1/57/2023316578646e1adab903caab714708422f83a57f97eb34a5d13510f4e1/PyQt5-5.15.7.tar.gz", hash = "sha256:755121a52b3a08cb07275c10ebb96576d36e320e572591db16cfdbc558101594", size = 3238978, upload-time = "2022-06-18T19:45:43.752Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/75/596d5e9ed7a135918bb157ed315004ac008e09b9b4c9328f94568c88f003/PyQt5-5.15.7-cp37-abi3-macosx_10_13_x86_64.whl", hash = "sha256:1a793748c60d5aff3850b7abf84d47c1d41edb11231b7d7c16bef602c36be643", size = 7015280, upload-time = "2022-06-18T19:44:22.309Z" },
-    { url = "https://files.pythonhosted.org/packages/22/0d/4ea05714826a5f6478dc2845cd94ad76dce3c4c0ead0842b06cacd4e3492/PyQt5-5.15.7-cp37-abi3-manylinux1_x86_64.whl", hash = "sha256:e319c9d8639e0729235c1b09c99afdadad96fa3dbd8392ab561b5ab5946ee6ef", size = 8376638, upload-time = "2022-06-18T19:44:54.133Z" },
-    { url = "https://files.pythonhosted.org/packages/c6/ea/5fa344ed69086218b30542c3b2e381c1f52ec4b141f878e9601e3b81dc71/PyQt5-5.15.7-cp37-abi3-win32.whl", hash = "sha256:08694f0a4c7d4f3d36b2311b1920e6283240ad3b7c09b515e08262e195dcdf37", size = 5395600, upload-time = "2022-06-18T19:45:11.841Z" },
-    { url = "https://files.pythonhosted.org/packages/bd/85/31a12415765acb48fddac3e207cfffcbbae826fe194cf1d92179d8872f59/PyQt5-5.15.7-cp37-abi3-win_amd64.whl", hash = "sha256:232fe5b135a095cbd024cf341d928fc672c963f88e6a52b0c605be8177c2fdb5", size = 6809141, upload-time = "2022-06-18T19:45:33.037Z" },
-]
-
-[[package]]
-name = "pyqt5-qt5"
-version = "5.15.18"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/46/90/bf01ac2132400997a3474051dd680a583381ebf98b2f5d64d4e54138dc42/pyqt5_qt5-5.15.18-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:8bb997eb903afa9da3221a0c9e6eaa00413bbeb4394d5706118ad05375684767", size = 39715743, upload-time = "2025-11-09T12:56:42.936Z" },
-    { url = "https://files.pythonhosted.org/packages/24/8e/76366484d9f9dbe28e3bdfc688183433a7b82e314216e9b14c89e5fab690/pyqt5_qt5-5.15.18-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c656af9c1e6aaa7f59bf3d8995f2fa09adbf6762b470ed284c31dca80d686a26", size = 36798484, upload-time = "2025-11-09T12:56:59.998Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/46/ffe177f99f897a59dc237a20059020427bd2d3853d713992b8081933ddfe/pyqt5_qt5-5.15.18-py3-none-manylinux2014_x86_64.whl", hash = "sha256:bf2457e6371969736b4f660a0c153258fa03dbc6a181348218e6f05421682af7", size = 60864590, upload-time = "2025-11-09T12:57:26.724Z" },
-]
-
-[[package]]
-name = "pyqt5-sip"
-version = "12.17.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ea/08/88a20c862f40b5c178c517cdc7e93767967dec5ac1b994e226d517991c9b/pyqt5_sip-12.17.1.tar.gz", hash = "sha256:0eab72bcb628f1926bf5b9ac51259d4fa18e8b2a81d199071135458f7d087ea8", size = 104136, upload-time = "2025-10-08T09:04:19.893Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/fd/097af91c0446c4877b2614f3e7e40729c7d0a276c401cef3ff95850cd236/pyqt5_sip-12.17.1-cp39-cp39-macosx_10_9_universal2.whl", hash = "sha256:6fdc457bd528e5909a5893db0a7dee0066d5f22e08234c9152db0ae6df9a367f", size = 122513, upload-time = "2025-10-08T09:04:18.867Z" },
-    { url = "https://files.pythonhosted.org/packages/2c/cf/58143e15d0bfa1d1450071ad9a2d71adca82ebefbd7729d0c543463d4d31/pyqt5_sip-12.17.1-cp39-cp39-manylinux_2_5_x86_64.manylinux1_x86_64.whl", hash = "sha256:06ea59741c1bffb198d99b00d26594791f45fb11b10f774c8105aea5962e3835", size = 268959, upload-time = "2025-10-08T09:15:38.323Z" },
-    { url = "https://files.pythonhosted.org/packages/e6/9b/8e8f1af1b500f0d4fcd48c9f7ee474731db8b046d3629151e382634eaf59/pyqt5_sip-12.17.1-cp39-cp39-win32.whl", hash = "sha256:b9ef23869d35c6740a95fcb1f387f4aea8d8fac80e19096fbaf1a64e18409c4b", size = 49030, upload-time = "2025-10-08T09:11:26.984Z" },
-    { url = "https://files.pythonhosted.org/packages/64/1e/08bd86000c8294772c6c4aaaf53babd69b9b37e80d1c87583c1fe8eeab5b/pyqt5_sip-12.17.1-cp39-cp39-win_amd64.whl", hash = "sha256:90eed15f19557dfab22e68c7763e3690053cc8dd30d93ade2523d1b5a04a87be", size = 59011, upload-time = "2025-10-08T09:08:37.924Z" },
-]
-
-[[package]]
 name = "sotsuken"
 version = "0.1.0"
 source = { virtual = "." }
@@ -96,7 +58,6 @@ dependencies = [
     { name = "mss" },
     { name = "numpy" },
     { name = "opencv-python" },
-    { name = "pyqt5" },
 ]
 
 [package.metadata]
@@ -104,5 +65,4 @@ requires-dist = [
     { name = "mss" },
     { name = "numpy" },
     { name = "opencv-python" },
-    { name = "pyqt5", specifier = "==5.15.7" },
 ]

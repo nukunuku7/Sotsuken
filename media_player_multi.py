@@ -10,6 +10,19 @@ from PyQt5.QtCore import QTimer, Qt
 from editor.grid_utils import load_points, log
 from warp_engine import warp_image, prepare_warp
 
+# === GPU 自動検出 ==================================================
+try:
+    import cv2.cuda as cuda
+    GPU_AVAILABLE = cuda.getCudaEnabledDeviceCount() > 0
+    if GPU_AVAILABLE:
+        log("◎ CUDA GPU が検出されました。GPU処理を使用します。")
+    else:
+        log("△ GPU は利用できません。CPU処理になります。")
+except Exception:
+    GPU_AVAILABLE = False
+    log("△ CUDA が利用できないため CPUモードで動作します。")
+# ===================================================================
+
 
 class DisplayWindow(QWidget):
     def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size,
@@ -25,6 +38,7 @@ class DisplayWindow(QWidget):
         self.virtual_size = virtual_size
         self.fade_enabled = fade_enabled
         self.warp_info = warp_info_all
+        self.use_gpu = GPU_AVAILABLE  # === GPUフラグ ===
 
         geom_tgt = target_screen.geometry()
         self.setGeometry(geom_tgt)
@@ -41,7 +55,7 @@ class DisplayWindow(QWidget):
             "height": geom_src.height()
         }
 
-        # グリッドをロード
+        # warp 情報
         points_local = load_points(target_screen.name(), mode)
         if not points_local:
             log(f"[WARN] グリッドが存在しないためスキップ: {target_screen.name()}")
@@ -62,9 +76,12 @@ class DisplayWindow(QWidget):
                 log_func=log
             )
 
+        # === 60fps に変更 =======
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
-        self.timer.start(33)
+        self.timer.start(16)  # 16ms = 60fps
+        # ========================
+
         self.showFullScreen()
 
     def update_frame(self):
@@ -72,30 +89,40 @@ class DisplayWindow(QWidget):
         if raw is None or raw.size == 0:
             return
 
-        frame = cv2.cvtColor(raw[:, :, :3], cv2.COLOR_BGR2RGB)
+        frame_cpu = cv2.cvtColor(raw[:, :, :3], cv2.COLOR_BGR2RGB)
+
         total_w, total_h = self.virtual_size
         geom_tgt = self.target_screen.geometry()
         part_w, part_h = geom_tgt.width(), geom_tgt.height()
 
-        # === 🎯 キャプチャ範囲：自分の担当 + 両端10%の重なり部分 ===
+        # === キャプチャ範囲：自分の担当 + 10% 重複 ===
         blend_ratio = 0.10
         overlap_px = int(part_w * blend_ratio)
-        x_start = int((self.offset_x / total_w) * frame.shape[1]) - overlap_px
-        x_end = int(((self.offset_x + part_w) / total_w) * frame.shape[1]) + overlap_px
+        x_start = int((self.offset_x / total_w) * frame_cpu.shape[1]) - overlap_px
+        x_end = int(((self.offset_x + part_w) / total_w) * frame_cpu.shape[1]) + overlap_px
 
         x_start = max(0, x_start)
-        x_end = min(frame.shape[1], x_end)
-        sub_frame = frame[:, x_start:x_end]
+        x_end = min(frame_cpu.shape[1], x_end)
+        sub_cpu = frame_cpu[:, x_start:x_end]
 
-        # === 🎯 sub_frame を FHD にフィットさせる ===
-        resized = cv2.resize(sub_frame, (part_w, part_h), interpolation=cv2.INTER_LINEAR)
+        # === GPU resize ====================================
+        if self.use_gpu:
+            gpu_frame = cuda_GpuMat = cuda_GpuMat = cuda_GpuMat = cuda_GpuMat
+            gpu_frame = cuda_GpuMat = cuda.GpuMat()
+            gpu_frame.upload(sub_cpu)
 
-        # === 🎯 歪み補正 ===
+            gpu_resized = cuda.resize(gpu_frame, (part_w, part_h))
+            resized = gpu_resized.download()
+        else:
+            resized = cv2.resize(sub_cpu, (part_w, part_h), interpolation=cv2.INTER_LINEAR)
+        # ===================================================
+
+        # === 歪み補正（warp_map は CPUのまま） ============
         warped = warp_image(resized, warp_info=self.warp_info)
         if warped is None:
             return
 
-        # === 🎨 フェードマスクで両端をブレンド ===
+        # === フェード（CPU） ==============================
         if self.fade_enabled:
             h, w = warped.shape[:2]
             fade = np.ones((h, w), dtype=np.float32)
@@ -103,12 +130,13 @@ class DisplayWindow(QWidget):
 
             for x in range(blend_w):
                 alpha = x / float(blend_w)
-                fade[:, x] *= alpha           # 左端フェードアウト
-                fade[:, -x - 1] *= alpha      # 右端フェードアウト
+                fade[:, x] *= alpha
+                fade[:, -x - 1] *= alpha
 
             warped = (warped.astype(np.float32) * fade[..., None]).astype(np.uint8)
+        # =================================================
 
-        # === 🎥 出力 ===
+        # === 出力 ========================================
         h, w, ch = warped.shape
         bytes_per_line = ch * w
         qt_image = QImage(warped.data, w, h, bytes_per_line, QImage.Format_RGB888)
@@ -132,7 +160,7 @@ def main():
 
     source_screen = screens[args.source]
     total_width = sum(screens[n].geometry().width() for n in args.targets if n in screens)
-    max_height = max(screens[n].geometry().height() for n in args.targets if n in screens)
+    max_height = max(screens[n].geometry().height() for n in screens if n in screens)
     virtual_size = (total_width, max_height)
 
     windows = []

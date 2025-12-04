@@ -1,4 +1,4 @@
-# warp_engine.py
+# warp_engine.py (GPU対応版)
 import os
 import json
 import math
@@ -12,6 +12,95 @@ except Exception:
     environment_config = None
 
 warp_cache = {}
+
+# --- GPU 検出: OpenCV CUDA と CuPy を試す --------------------------------
+USE_CV2_CUDA = False
+USE_CUPY = False
+try:
+    if hasattr(cv2, "cuda"):
+        try:
+            if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                USE_CV2_CUDA = True
+        except Exception:
+            USE_CV2_CUDA = False
+except Exception:
+    USE_CV2_CUDA = False
+
+try:
+    import cupy as cp
+    # 簡易チェック: デバイスが使えるか
+    try:
+        _ = cp.cuda.Device().id
+        USE_CUPY = True
+    except Exception:
+        USE_CUPY = False
+except Exception:
+    USE_CUPY = False
+
+# Prepare a CuPy kernel for remap (bilinear) if cupy is available
+CUPY_REMAP_KERNEL = None
+if USE_CUPY:
+    # CUDA C kernel: bilinear sampling from src using floating map coords (map_x,map_y).
+    # src: uint8 pointer (h_src x w_src x c), stored as linear array
+    # map_x,map_y: float arrays (h_dst x w_dst) with source x,y (float)
+    # dst: uint8 pointer (h_dst x w_dst x c)
+    # We'll handle bounds checking: if sampled coords outside -> write black.
+    remap_code = r'''
+    extern "C" __global__
+    void remap_bilinear(const unsigned char* src, int h_src, int w_src, int c,
+                        const float* map_x, const float* map_y,
+                        unsigned char* dst, int h_dst, int w_dst) {
+        int x = blockIdx.x * blockDim.x + threadIdx.x;
+        int y = blockIdx.y * blockDim.y + threadIdx.y;
+        if (x >= w_dst || y >= h_dst) return;
+        int dst_idx = (y * w_dst + x) * c;
+
+        int idx = y * w_dst + x;
+        float fx = map_x[idx];
+        float fy = map_y[idx];
+
+        // treat out-of-range as black
+        if (!(fx >= 0.0f && fx <= (float)(w_src - 1) && fy >= 0.0f && fy <= (float)(h_src - 1))) {
+            for (int ch = 0; ch < c; ++ch) dst[dst_idx + ch] = 0;
+            return;
+        }
+
+        // bilinear
+        int x0 = (int)floorf(fx);
+        int y0 = (int)floorf(fy);
+        int x1 = min(x0 + 1, w_src - 1);
+        int y1 = min(y0 + 1, h_src - 1);
+
+        float wx = fx - (float)x0;
+        float wy = fy - (float)y0;
+
+        for (int ch = 0; ch < c; ++ch) {
+            int idx00 = (y0 * w_src + x0) * c + ch;
+            int idx10 = (y0 * w_src + x1) * c + ch;
+            int idx01 = (y1 * w_src + x0) * c + ch;
+            int idx11 = (y1 * w_src + x1) * c + ch;
+
+            float v00 = (float)src[idx00];
+            float v10 = (float)src[idx10];
+            float v01 = (float)src[idx01];
+            float v11 = (float)src[idx11];
+
+            float v0 = v00 * (1.0f - wx) + v10 * wx;
+            float v1 = v01 * (1.0f - wx) + v11 * wx;
+            float v = v0 * (1.0f - wy) + v1 * wy;
+
+            int out = (int)(v + 0.5f);
+            if (out < 0) out = 0;
+            if (out > 255) out = 255;
+            dst[dst_idx + ch] = (unsigned char) out;
+        }
+    }
+    '''
+    try:
+        CUPY_REMAP_KERNEL = cp.RawKernel(remap_code, 'remap_bilinear')
+    except Exception:
+        CUPY_REMAP_KERNEL = None
+        USE_CUPY = False
 
 # --- ヘルパー ---
 def _log(msg, log_func=None):
@@ -28,31 +117,19 @@ def _normalize(v):
     return v / n
 
 def _fit_plane(points):
-    """
-    点群から平面の基底を推定する（PCA）
-    returns (origin, u_vec, v_vec, normal)
-    """
     pts = np.asarray(points, dtype=np.float64)
     centroid = pts.mean(axis=0)
     cov = np.cov((pts - centroid).T)
     eigvals, eigvecs = np.linalg.eigh(cov)
-    # eigvals ascending -> smallest is normal
     normal = eigvecs[:, 0]
     u = eigvecs[:, 2]
     v = eigvecs[:, 1]
     return centroid, _normalize(u), _normalize(v), _normalize(normal)
 
 def _nearest_along_ray(ray_o, ray_d, points, t_min=0.0, t_max=10.0):
-    """
-    点群 points に対し、ray = ray_o + t * ray_d が最も近づく点を探す（t>0）。
-    返り値: (best_point, best_t, distance)
-    """
     pts = np.asarray(points, dtype=np.float64)
-    # vectors from origin to pts
     vecs = pts - ray_o[None, :]
-    # project onto ray_d
     t_vals = np.dot(vecs, ray_d)
-    # clamp to positive
     mask = t_vals > t_min
     if not np.any(mask):
         return None, None, None
@@ -61,7 +138,6 @@ def _nearest_along_ray(ray_o, ray_d, points, t_min=0.0, t_max=10.0):
     ts = t_vals
     projected = ray_o[None, :] + np.outer(ts, ray_d)
     dists = np.linalg.norm(projected - candidate_pts, axis=1)
-    # find minimal distance
     idx = np.argmin(dists)
     best_t = ts[idx]
     best_pt = candidate_pts[idx]
@@ -71,13 +147,8 @@ def _nearest_along_ray(ray_o, ray_d, points, t_min=0.0, t_max=10.0):
     return best_pt, float(best_t), float(best_dist)
 
 def _estimate_normal_at_vertex(vertex_idx, pts, k=20):
-    """
-    単一頂点周りの局所法線を PCA で推定する（k 近傍を採る）。
-    pts は Nx3 配列。vertex_idx は pts 中の index。
-    """
     pts = np.asarray(pts, dtype=np.float64)
     v = pts[vertex_idx]
-    # compute distances
     dists = np.linalg.norm(pts - v[None, :], axis=1)
     idxs = np.argsort(dists)
     k = min(k, len(idxs))
@@ -85,19 +156,14 @@ def _estimate_normal_at_vertex(vertex_idx, pts, k=20):
     centroid = neigh.mean(axis=0)
     cov = np.cov((neigh - centroid).T)
     eigvals, eigvecs = np.linalg.eigh(cov)
-    normal = eigvecs[:, 0]  # smallest eigenvalue direction
+    normal = eigvecs[:, 0]
     return _normalize(normal)
 
 def _estimate_normals_for_pointcloud(pts, sample_stride=1, k=20):
-    """
-    点群全体の局所法線を返す（重い）。必要ならサブサンプリングを検討。
-    戻り値: Nx3 normals
-    """
     pts = np.asarray(pts, dtype=np.float64)
     n = len(pts)
     normals = np.zeros_like(pts)
     for i in range(0, n, sample_stride):
-        # find nearest neighbors
         dists = np.linalg.norm(pts - pts[i], axis=1)
         idn = np.argsort(dists)[:min(k, n)]
         neigh = pts[idn]
@@ -106,10 +172,8 @@ def _estimate_normals_for_pointcloud(pts, sample_stride=1, k=20):
         eigvals, eigvecs = np.linalg.eigh(cov)
         normal = eigvecs[:, 0]
         normals[i] = _normalize(normal)
-    # fill missing by simple copy (for indices skipped by stride)
     for i in range(n):
         if np.all(normals[i] == 0):
-            # nearest nonzero
             nn = np.where(np.linalg.norm(normals, axis=1) > 0)[0]
             if nn.size:
                 normals[i] = normals[nn[0]]
@@ -122,7 +186,7 @@ def _reflect(d, n):
     n = _normalize(n)
     return d - 2.0 * np.dot(d, n) * n
 
-# --- perspective 行列生成 (従来機能) ---
+# --- perspective matrix generator ---
 def generate_perspective_matrix(src_size, dst_points):
     w, h = src_size
     if len(dst_points) != 4:
@@ -131,36 +195,25 @@ def generate_perspective_matrix(src_size, dst_points):
     dst_pts = np.array(dst_points, dtype=np.float32)
     return cv2.getPerspectiveTransform(src_pts, dst_pts)
 
-# --- DISPLAY -> simulation set mapping (environment_config 側の順序にあわせて調整してください) ---
-# ここは main.py と一致するように必要に応じて変更してください
+# DISPLAY_TO_SIMSET (変更しない)
 DISPLAY_TO_SIMSET = {
-    r"\\.\DISPLAY2": 0,  # 右
-    r"\\.\DISPLAY3": 1,  # 中央
-    r"\\.\DISPLAY4": 2,  # 左
+    r"\\.\DISPLAY2": 0,
+    r"\\.\DISPLAY3": 1,
+    r"\\.\DISPLAY4": 2,
 }
 
-# --- prepare_warp: main entrypoint ---
+# --- prepare_warp: 既存コード (省略せずそのまま使用) ---
 def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
-    """
-    display_name: '\\\\.\\DISPLAY2' のような PyQt 上の名前
-    mode: 'perspective' or 'warp_map'
-    src_size: (width, height) - 出力先（プロジェクター側）ピクセルサイズ（例: (1920,1080)）
-    load_points_func: 外部からグリッド点を供給する関数( name, mode ) -> points list
-    log_func: ログ関数
-    """
     _log(f"[prepare_warp] Display={display_name} Mode={mode} Size={src_size}", log_func)
-
     cache_key = (display_name, mode, src_size)
     if cache_key in warp_cache:
         _log("[cache] hit", log_func)
         return warp_cache[cache_key]
 
-    # --- 1) perspective モード（既存グリッド4点） の場合は従来通り処理 ---
     if mode == "perspective":
         if load_points_func:
             pts = load_points_func(display_name, mode)
         else:
-            # default: read from config/projector_profiles file
             cfg_path = os.path.join("config", "projector_profiles", f"__._{display_name}_{mode}_points.json")
             if not os.path.exists(cfg_path):
                 _log(f"[WARN] perspective grid file not found: {cfg_path}", log_func)
@@ -175,8 +228,7 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         _log(f"[OK] perspective matrix prepared for {display_name}", log_func)
         return warp_cache[cache_key]
 
-    # --- 2) warp_map モード（点群ベースの近似レイトレーシング） ---
-    # We need environment_config available
+    # warp_map mode: heavy CPU precompute (unchanged)
     if environment_config is None:
         _log("[ERROR] environment_config not available. Place config/environment_config.py", log_func)
         return None
@@ -199,29 +251,22 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         _log("[WARN] incomplete sim set (need projector/mirror/screen)", log_func)
         return None
 
-        # projector origin, direction, FOV, resolution
     proj_origin = np.array(proj["origin"], dtype=np.float64)
     proj_dir = _normalize(np.array(proj["direction"], dtype=np.float64))
     fov_h = float(proj.get("fov_h", 53.13))
     fov_v = float(proj.get("fov_v", fov_h))
     proj_resolution = tuple(proj.get("resolution", [int(src_size[0]), int(src_size[1])]))
 
-    # --- ★ 垂直キーストーン補正を追加（degrees） ---
     keystone_v = float(proj.get("keystone_v", 0.0))
     if abs(keystone_v) > 1e-6:
-        # projector image plane basis (right & up)
         default_up = np.array([0.0, 0.0, 1.0])
         if abs(np.dot(default_up, proj_dir)) > 0.99:
             default_up = np.array([0.0, 1.0, 0.0])
         right = _normalize(np.cross(proj_dir, default_up))
         up = _normalize(np.cross(right, proj_dir))
-
-        # rotate proj_dir around "right" axis by keystone angle
         theta = math.radians(keystone_v)
         cos_t = math.cos(theta)
         sin_t = math.sin(theta)
-
-        # Rodrigues rotation formula
         proj_dir = _normalize(
             proj_dir * cos_t +
             np.cross(right, proj_dir) * sin_t +
@@ -229,16 +274,13 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         )
         _log(f"[keystone] vertical keystone applied: {keystone_v} deg", log_func)
 
-    # mirror point cloud & screen point cloud
     mirror_pts = np.array(mirror.get("vertices", []), dtype=np.float64)
     screen_pts = np.array(screen.get("vertices", []), dtype=np.float64)
     if mirror_pts.size == 0 or screen_pts.size == 0:
         _log("[WARN] mirror or screen point cloud empty", log_func)
         return None
 
-    # precompute screen plane basis for mapping 3D hit -> 2D pixel
     screen_centroid, screen_u, screen_v, screen_normal = _fit_plane(screen_pts)
-    # project screen_pts into (u,v) coordinates for bounding box
     uv_coords = np.stack([np.dot(screen_pts - screen_centroid, screen_u),
                           np.dot(screen_pts - screen_centroid, screen_v)], axis=1)
     u_min, v_min = uv_coords.min(axis=0)
@@ -248,75 +290,52 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
     map_x = np.zeros((h_out, w_out), dtype=np.float32)
     map_y = np.zeros((h_out, w_out), dtype=np.float32)
 
-    # For speed: optionally subsample mirror normals or compute normals for points
-    # We'll compute normals for mirror pointcloud with modest k to get local normal estimates.
     try:
         mirror_normals = _estimate_normals_for_pointcloud(mirror_pts, sample_stride=1, k=16)
     except Exception:
         mirror_normals = np.tile(np.array([0,0,1.0]), (len(mirror_pts),1))
 
-    # define projector imaging plane: we will map pixel (i,j) in output (src_size) -> ray
-    # Approach: assume projector is pinhole at proj_origin, with horizontal FOV fov_h covering width w_out, vertical fov_v covering height h_out.
-    # pixel center angle offsets:
-    # map pixel x in [0..w_out-1] -> angle_x = ( (x+0.5)/w_out - 0.5) * fov_h (deg -> rad)
-    # same for y.
     fov_h_rad = math.radians(fov_h)
     fov_v_rad = math.radians(fov_v)
 
-    # Precompute image plane basis for projector. We need two orthonormal axes perpendicular to proj_dir.
-    # pick arbitrary up (0,0,1) unless parallel
     default_up = np.array([0.0, 0.0, 1.0])
     if abs(np.dot(default_up, proj_dir)) > 0.99:
         default_up = np.array([0.0, 1.0, 0.0])
     right = _normalize(np.cross(proj_dir, default_up))
     up = _normalize(np.cross(right, proj_dir))
 
-    # For each pixel compute ray direction
-    # We'll iterate over pixels - this is the heavy part. Consider subsampling for speed if too slow.
     for yy in range(h_out):
-        # vertical angle
         v = ( (yy + 0.5) / h_out - 0.5 ) * fov_v_rad
         for xx in range(w_out):
             u = ( (xx + 0.5) / w_out - 0.5 ) * fov_h_rad
-            # direction in camera coordinates
             dir_cam = (_normalize(proj_dir) * 1.0 +
                        right * math.tan(u) +
                        up * math.tan(v))
             dir_cam = _normalize(dir_cam)
 
-            # 1) intersect with mirror (approx by nearest point along ray)
             mirror_hit_pt, t_m, dist_m = _nearest_along_ray(proj_origin, dir_cam, mirror_pts, t_min=0.01, t_max=10.0)
             if mirror_hit_pt is None:
-                # leave mapping at 0 (black)
                 map_x[yy, xx] = 0.0
                 map_y[yy, xx] = 0.0
                 continue
 
-            # find index of that mirror point to get normal
-            # (brute-force find index; could optimize with kd-tree)
-            # use exact match by distance
             diffs = mirror_pts - mirror_hit_pt[None,:]
             idx = int(np.argmin(np.linalg.norm(diffs, axis=1)))
             n = mirror_normals[idx]
             if np.linalg.norm(n) == 0:
-                n = screen_normal  # fallback
+                n = screen_normal
 
-            # reflect
             refl = _reflect(dir_cam, n)
-
-            # 2) trace reflected ray to screen (nearest point along reflected ray)
             screen_hit_pt, t_s, dist_s = _nearest_along_ray(mirror_hit_pt + refl * 1e-6, refl, screen_pts, t_min=0.01, t_max=10.0)
             if screen_hit_pt is None:
                 map_x[yy, xx] = 0.0
                 map_y[yy, xx] = 0.0
                 continue
 
-            # 3) convert screen_hit_pt -> local (u,v) coordinates on screen plane
             rel = screen_hit_pt - screen_centroid
             ucoord = float(np.dot(rel, screen_u))
             vcoord = float(np.dot(rel, screen_v))
 
-            # normalized fraction across screen bounds
             if (u_max - u_min) == 0 or (v_max - v_min) == 0:
                 map_x[yy, xx] = 0.0
                 map_y[yy, xx] = 0.0
@@ -325,17 +344,12 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
             fx = (ucoord - u_min) / (u_max - u_min)
             fy = (vcoord - v_min) / (v_max - v_min)
 
-            # clamp
             if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
-                # outside screen bounds -> mark transparent/black
                 map_x[yy, xx] = 0.0
                 map_y[yy, xx] = 0.0
             else:
-                # map to pixel coords in the projector's image plane (assume projector resolution)
                 sx = fx * (proj_resolution[0] - 1)
-                sy = (1.0 - fy) * (proj_resolution[1] - 1)  # v coordinate -> image y (flip if needed)
-                # However prepare_warp should return mapping from dest pixel to source pixel coordinates.
-                # Since our dest is the projector (src_size), map_x,map_y use source image coordinate system (projector image)
+                sy = (1.0 - fy) * (proj_resolution[1] - 1)
                 map_x[yy, xx] = float(sx)
                 map_y[yy, xx] = float(sy)
 
@@ -347,31 +361,111 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
     _log(f"[OK] warp_map prepared for {display_name} ({w_out}x{h_out})", log_func)
     return warp_cache[cache_key]
 
-# --- warp_image: same as before (apply mapping) ---
+# --- warp_image: GPU を優先する実装 ---
 def warp_image(image, warp_info, log_func=None):
+    """
+    image: HxWxC (RGB uint8) の numpy array
+    warp_info: prepare_warp の戻り値
+    動作:
+      - perspective: 可能なら cv2.cuda.warpPerspective を使う
+      - warp_map: 可能なら CuPy カーネルで remap（bilinear）を行う
+      - どちらも無ければ既存の CPU 実装にフォールバック
+    """
     if image is None or warp_info is None:
         return image
 
     h, w = image.shape[:2]
+
     try:
-        if warp_info["mode"] == "perspective":
-            warped = cv2.warpPerspective(image, warp_info["matrix"], (w, h),
-                                         borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
-        elif warp_info["mode"] == "warp_map":
-            # map_x,map_y are float coordinates in source image (projector image)
-            map_x = warp_info["map_x"]
-            map_y = warp_info["map_y"]
-            # resize maps to current image size if necessary
+        mode = warp_info.get("mode", None)
+        if mode == "perspective":
+            matrix = warp_info.get("matrix", None)
+            if matrix is None:
+                return image
+
+            # === GPU path for perspective ===
+            if USE_CV2_CUDA:
+                try:
+                    gpu_src = cv2.cuda_GpuMat()
+                    gpu_src.upload(image)
+                    gpu_dst = cv2.cuda_GpuMat()
+                    # Note: warpPerspective size is (width, height) in OpenCV call
+                    gpu_matrix = matrix
+                    cv2.cuda.warpPerspective(gpu_src, gpu_dst, gpu_matrix, (w, h),
+                                             flags=cv2.INTER_LINEAR,
+                                             borderMode=cv2.BORDER_CONSTANT,
+                                             borderValue=(0, 0, 0))
+                    out = gpu_dst.download()
+                    return out
+                except Exception as e:
+                    _log(f"[WARN] cv2.cuda.warpPerspective failed, falling back to CPU: {e}", log_func)
+                    # fallthrough to CPU
+
+            # CPU fallback
+            warped = cv2.warpPerspective(image, matrix, (w, h),
+                                         flags=cv2.INTER_LINEAR,
+                                         borderMode=cv2.BORDER_CONSTANT,
+                                         borderValue=(0, 0, 0))
+            return warped
+
+        elif mode == "warp_map":
+            map_x = warp_info.get("map_x", None)
+            map_y = warp_info.get("map_y", None)
+            if map_x is None or map_y is None:
+                return image
+
+            # resize maps to current image size if necessary (CPU small op)
             if map_x.shape != (h, w):
                 map_x = cv2.resize(map_x, (w, h), interpolation=cv2.INTER_LINEAR)
                 map_y = cv2.resize(map_y, (w, h), interpolation=cv2.INTER_LINEAR)
-            warped = cv2.remap(image, map_x.astype(np.float32), map_y.astype(np.float32),
+
+            # === GPU path for warpmapping using CuPy kernel ===
+            if USE_CUPY and CUPY_REMAP_KERNEL is not None:
+                try:
+                    # upload src as uint8 1D linear array
+                    src_cp = cp.asarray(image)  # shape (h,w,c), dtype=uint8
+                    # ensure contiguous
+                    src_cp = src_cp.astype(cp.uint8, copy=False)
+                    mapx_cp = cp.asarray(map_x.astype(np.float32))
+                    mapy_cp = cp.asarray(map_y.astype(np.float32))
+
+                    h_dst, w_dst = mapx_cp.shape
+                    c = int(src_cp.shape[2]) if src_cp.ndim == 3 else 1
+
+                    # flatten src and dst buffers
+                    src_flat = src_cp.ravel()
+                    dst_cp = cp.zeros((h_dst, w_dst, c), dtype=cp.uint8)
+                    dst_flat = dst_cp.ravel()
+
+                    threads_x = 16
+                    threads_y = 16
+                    block = (threads_x, threads_y, 1)
+                    grid_x = (w_dst + threads_x - 1) // threads_x
+                    grid_y = (h_dst + threads_y - 1) // threads_y
+                    grid = (grid_x, grid_y, 1)
+
+                    # Launch kernel
+                    CUPY_REMAP_KERNEL(grid, block,
+                                      (src_flat, np.int32(src_cp.shape[0]), np.int32(src_cp.shape[1]), np.int32(c),
+                                       mapx_cp, mapy_cp, dst_flat, np.int32(h_dst), np.int32(w_dst)))
+
+                    out = cp.asnumpy(dst_cp)
+                    return out
+                except Exception as e:
+                    _log(f"[WARN] CuPy remap kernel failed, falling back to CPU remap: {e}", log_func)
+                    # fallthrough to CPU
+
+            # CPU fallback: use cv2.remap
+            warped = cv2.remap(image,
+                               map_x.astype(np.float32),
+                               map_y.astype(np.float32),
                                interpolation=cv2.INTER_LINEAR,
-                               borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+                               borderMode=cv2.BORDER_CONSTANT,
+                               borderValue=(0, 0, 0))
+            return warped
+
         else:
             return image
-
-        return warped
 
     except Exception as e:
         if log_func:

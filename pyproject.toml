@@ -3,6 +3,7 @@ name = "Sotsuken"
 version = "0.1.0"
 requires-python = ">=3.9,<3.10"
 dependencies = [
+    "cupy-cuda12x",
     "numpy",
     "opencv-python",
     "mss",

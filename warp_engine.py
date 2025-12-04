@@ -209,11 +209,15 @@ def generate_perspective_matrix(src_size, dst_points):
     return cv2.getPerspectiveTransform(src_pts, dst_pts)
 
 # DISPLAY_TO_SIMSET (変更しない)
-DISPLAY_TO_SIMSET = {
-    r"\\.\DISPLAY2": 0,
-    r"\\.\DISPLAY3": 1,
-    r"\\.\DISPLAY4": 2,
-}
+DISPLAY_TO_SIMSET = {}
+
+try:
+    with open("config/display_map.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
+        DISPLAY_TO_SIMSET = data.get("display_map", {})
+except Exception:
+    DISPLAY_TO_SIMSET = {}
+
 
 # --- prepare_warp: 既存コード (省略せずそのまま使用) ---
 def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):

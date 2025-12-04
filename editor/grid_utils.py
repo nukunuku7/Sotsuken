@@ -11,6 +11,15 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PROFILE_DIR = os.path.join(ROOT_DIR, "config", "projector_profiles")
 os.makedirs(PROFILE_DIR, exist_ok=True)
 
+# --- 新規追加：PyQt名 → 統一ID（D1, D2, ...）マッピング ---
+def get_virtual_id(display_name: str) -> str:
+    screens = QGuiApplication.screens()
+    ordered = sorted(screens, key=lambda s: s.geometry().x())
+    for i, s in enumerate(ordered):
+        if s.name() == display_name:
+            return f"D{i+1}"
+    return display_name  # 見つからなければそのまま返す
+
 def sanitize_filename(display_name: str, mode: str):
     safe_name = re.sub(r'[\\/:*?"<>|.\s]+', "_", display_name)
     safe_name = re.sub(r"^_+", "", safe_name)
@@ -42,7 +51,7 @@ def load_edit_profile():
         return {}
 
 def save_points(display_name: str, points: list, mode: str = "perspective"):
-    path = get_point_path(display_name, mode)
+    path = get_point_path(get_virtual_id(display_name), mode)
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(points, f, indent=2, ensure_ascii=False)
@@ -51,7 +60,7 @@ def save_points(display_name: str, points: list, mode: str = "perspective"):
         log(f"[ERROR] Failed to save points: {e}")
 
 def load_points(display_name: str, mode: str = "perspective"):
-    path = get_point_path(display_name, mode)
+    path = get_point_path(get_virtual_id(display_name), mode)
     if not os.path.exists(path):
         log(f"[DEBUG] グリッドファイルが存在しません: {path}")
         return None

@@ -45,13 +45,20 @@ def load_edit_profile():
 
 
 # --- ディスプレイの実機配置とPyQt名のマッピング ---
-# Windows上の並び：4(左端) → 3 → 2 → 1(右端)
-DISPLAY_MAPPING = {
-    "1": r"\\.\DISPLAY1",
-    "2": r"\\.\DISPLAY3",
-    "3": r"\\.\DISPLAY2",
-    "4": r"\\.\DISPLAY4"
-}
+# --- 動的ディスプレイ検出関数 ---
+def get_display_mapping():
+    """
+    接続されているスクリーンを x 座標順（左→右）に並べ、
+    '1','2','3',... のラベルを割り当てた dict を返す。
+    値は PyQt の screen.name()（例 '\\\\.\\DISPLAY6'）となる。
+    """
+    screens = QGuiApplication.screens()
+    # sort by x coordinate (left -> right)
+    sorted_screens = sorted(screens, key=lambda s: s.geometry().x())
+    mapping = {}
+    for idx, s in enumerate(sorted_screens, start=1):
+        mapping[str(idx)] = s.name()
+    return mapping
 
 
 class MainWindow(QMainWindow):
@@ -97,9 +104,13 @@ class MainWindow(QMainWindow):
         save_edit_profile(self.edit_display_name)
 
     def init_projector_list(self):
-        """Windows番号順でリストを作成"""
+        """Windows番号順でリストを作成（実機の左→右を 1..N に割当）"""
         self.projector_list.clear()
-        for win_id, pyqt_name in DISPLAY_MAPPING.items():
+        display_map = get_display_mapping()  # 動的マッピングを取得
+        # store for later use (launch 等で同じ割当を使うため)
+        self.display_map = display_map
+
+        for win_id, pyqt_name in display_map.items():
             # 編集用ディスプレイは除外
             if pyqt_name == self.edit_display_name:
                 continue
@@ -226,6 +237,21 @@ class MainWindow(QMainWindow):
             cmd.append("--blend")
 
         subprocess.Popen(cmd)
+
+
+# --- GPU 利用可否チェック（main 側の確認用） ---
+def is_gpu_available_main():
+    try:
+        import cupy as cp
+        # device count check
+        cnt = cp.cuda.runtime.getDeviceCount()
+        if cnt <= 0:
+            return False
+        # quick sanity op
+        _ = cp.array([1], dtype=cp.int32) * 2
+        return True
+    except Exception:
+        return False
 
 
 # --- アプリ起動 ---

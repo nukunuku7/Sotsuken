@@ -1,4 +1,4 @@
-# warp_engine.py (GPU対応版)
+# warp_engine.py (GPU対応版 + 転送最適化)
 import os
 import json
 import math
@@ -40,11 +40,6 @@ except Exception:
 # Prepare a CuPy kernel for remap (bilinear) if cupy is available
 CUPY_REMAP_KERNEL = None
 if USE_CUPY:
-    # CUDA C kernel: bilinear sampling from src using floating map coords (map_x,map_y).
-    # src: uint8 pointer (h_src x w_src x c), stored as linear array
-    # map_x,map_y: float arrays (h_dst x w_dst) with source x,y (float)
-    # dst: uint8 pointer (h_dst x w_dst x c)
-    # We'll handle bounds checking: if sampled coords outside -> write black.
     remap_code = r'''
     extern "C" __global__
     void remap_bilinear(const unsigned char* src, int h_src, int w_src, int c,
@@ -59,13 +54,11 @@ if USE_CUPY:
         float fx = map_x[idx];
         float fy = map_y[idx];
 
-        // treat out-of-range as black
         if (!(fx >= 0.0f && fx <= (float)(w_src - 1) && fy >= 0.0f && fy <= (float)(h_src - 1))) {
             for (int ch = 0; ch < c; ++ch) dst[dst_idx + ch] = 0;
             return;
         }
 
-        // bilinear
         int x0 = (int)floorf(fx);
         int y0 = (int)floorf(fy);
         int x1 = min(x0 + 1, w_src - 1);
@@ -101,6 +94,26 @@ if USE_CUPY:
     except Exception:
         CUPY_REMAP_KERNEL = None
         USE_CUPY = False
+
+# --- GPU キャッシュ & 設定 -----------------------------------------------
+_gpu_cache = {
+    "cv2_src": None,       # cv2.cuda_GpuMat reuse (perspective)
+    "cv2_dst": None,
+    "cupy_map_x": None,    # map_x on GPU
+    "cupy_map_y": None,    # map_y on GPU
+    "cupy_src": None,      # GPU src buffer (device)
+    "cupy_dst": None,      # GPU dst buffer (device)
+    "cupy_pinned": None,   # pinned host memory (memoryview)
+    "last_shape": None,    # shape used for pinned buffer
+    "stream": None,        # primary cupy stream for async ops
+}
+
+# default stream init when cupy available
+if USE_CUPY:
+    try:
+        _gpu_cache["stream"] = cp.cuda.Stream(non_blocking=True)
+    except Exception:
+        _gpu_cache["stream"] = None
 
 # --- ヘルパー ---
 def _log(msg, log_func=None):
@@ -361,15 +374,11 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
     _log(f"[OK] warp_map prepared for {display_name} ({w_out}x{h_out})", log_func)
     return warp_cache[cache_key]
 
-# --- warp_image: GPU を優先する実装 ---
+# --- warp_image: GPU を優先する実装 + 転送最適化 --------------
 def warp_image(image, warp_info, log_func=None):
     """
     image: HxWxC (RGB uint8) の numpy array
     warp_info: prepare_warp の戻り値
-    動作:
-      - perspective: 可能なら cv2.cuda.warpPerspective を使う
-      - warp_map: 可能なら CuPy カーネルで remap（bilinear）を行う
-      - どちらも無ければ既存の CPU 実装にフォールバック
     """
     if image is None or warp_info is None:
         return image
@@ -378,28 +387,34 @@ def warp_image(image, warp_info, log_func=None):
 
     try:
         mode = warp_info.get("mode", None)
+        # -------------------
+        # perspective
+        # -------------------
         if mode == "perspective":
             matrix = warp_info.get("matrix", None)
             if matrix is None:
                 return image
 
-            # === GPU path for perspective ===
+            # use cv2.cuda if available, reuse GpuMat
             if USE_CV2_CUDA:
                 try:
-                    gpu_src = cv2.cuda_GpuMat()
-                    gpu_src.upload(image)
-                    gpu_dst = cv2.cuda_GpuMat()
-                    # Note: warpPerspective size is (width, height) in OpenCV call
-                    gpu_matrix = matrix
-                    cv2.cuda.warpPerspective(gpu_src, gpu_dst, gpu_matrix, (w, h),
+                    if _gpu_cache["cv2_src"] is None:
+                        _gpu_cache["cv2_src"] = cv2.cuda_GpuMat()
+                        _gpu_cache["cv2_dst"] = cv2.cuda_GpuMat()
+                    gsrc = _gpu_cache["cv2_src"]
+                    gdst = _gpu_cache["cv2_dst"]
+
+                    # upload (cv2 handles internal pinned/fast path)
+                    gsrc.upload(image)
+                    cv2.cuda.warpPerspective(gsrc, gdst, matrix, (w, h),
                                              flags=cv2.INTER_LINEAR,
                                              borderMode=cv2.BORDER_CONSTANT,
                                              borderValue=(0, 0, 0))
-                    out = gpu_dst.download()
+                    out = gdst.download()
                     return out
                 except Exception as e:
-                    _log(f"[WARN] cv2.cuda.warpPerspective failed, falling back to CPU: {e}", log_func)
-                    # fallthrough to CPU
+                    _log(f"[WARN] cv2.cuda perspective failed, fallback to CPU: {e}", log_func)
+                    # fallthrough
 
             # CPU fallback
             warped = cv2.warpPerspective(image, matrix, (w, h),
@@ -408,54 +423,90 @@ def warp_image(image, warp_info, log_func=None):
                                          borderValue=(0, 0, 0))
             return warped
 
+        # -------------------
+        # warp_map
+        # -------------------
         elif mode == "warp_map":
             map_x = warp_info.get("map_x", None)
             map_y = warp_info.get("map_y", None)
             if map_x is None or map_y is None:
                 return image
 
-            # resize maps to current image size if necessary (CPU small op)
+            # resize maps to current image size if necessary (cheap)
             if map_x.shape != (h, w):
                 map_x = cv2.resize(map_x, (w, h), interpolation=cv2.INTER_LINEAR)
                 map_y = cv2.resize(map_y, (w, h), interpolation=cv2.INTER_LINEAR)
 
-            # === GPU path for warpmapping using CuPy kernel ===
+            # GPU path using CuPy kernel + pinned memory + async stream
             if USE_CUPY and CUPY_REMAP_KERNEL is not None:
                 try:
-                    # upload src as uint8 1D linear array
-                    src_cp = cp.asarray(image)  # shape (h,w,c), dtype=uint8
-                    # ensure contiguous
-                    src_cp = src_cp.astype(cp.uint8, copy=False)
-                    mapx_cp = cp.asarray(map_x.astype(np.float32))
-                    mapy_cp = cp.asarray(map_y.astype(np.float32))
+                    stream = _gpu_cache.get("stream", None)
+                    if stream is None:
+                        stream = cp.cuda.Stream(non_blocking=True)
 
-                    h_dst, w_dst = mapx_cp.shape
-                    c = int(src_cp.shape[2]) if src_cp.ndim == 3 else 1
+                    # cache map_x/map_y on GPU (once)
+                    if _gpu_cache["cupy_map_x"] is None or _gpu_cache["cupy_map_x"].shape != map_x.shape:
+                        _gpu_cache["cupy_map_x"] = cp.asarray(map_x.astype(np.float32))
+                        _gpu_cache["cupy_map_y"] = cp.asarray(map_y.astype(np.float32))
 
-                    # flatten src and dst buffers
-                    src_flat = src_cp.ravel()
-                    dst_cp = cp.zeros((h_dst, w_dst, c), dtype=cp.uint8)
-                    dst_flat = dst_cp.ravel()
+                    mapx_cp = _gpu_cache["cupy_map_x"]
+                    mapy_cp = _gpu_cache["cupy_map_y"]
 
-                    threads_x = 16
-                    threads_y = 16
-                    block = (threads_x, threads_y, 1)
-                    grid_x = (w_dst + threads_x - 1) // threads_x
-                    grid_y = (h_dst + threads_y - 1) // threads_y
-                    grid = (grid_x, grid_y, 1)
+                    # prepare pinned buffer if needed
+                    nbytes = image.nbytes
+                    if _gpu_cache["cupy_pinned"] is None or _gpu_cache["last_shape"] != image.shape:
+                        # allocate pinned memory and create a memoryview
+                        mem = cp.cuda.alloc_pinned_memory(nbytes)
+                        _gpu_cache["cupy_pinned"] = mem
+                        _gpu_cache["last_shape"] = image.shape
 
-                    # Launch kernel
-                    CUPY_REMAP_KERNEL(grid, block,
-                                      (src_flat, np.int32(src_cp.shape[0]), np.int32(src_cp.shape[1]), np.int32(c),
-                                       mapx_cp, mapy_cp, dst_flat, np.int32(h_dst), np.int32(w_dst)))
+                        # allocate device src/dst buffers sized to image
+                        _gpu_cache["cupy_src"] = cp.empty(image.shape, dtype=cp.uint8)
+                        _gpu_cache["cupy_dst"] = cp.empty_like(_gpu_cache["cupy_src"])
 
-                    out = cp.asnumpy(dst_cp)
+                    # copy into pinned memory (host mem)
+                    # mem supports buffer protocol in recent cupy; use memoryview
+                    buf = memoryview(_gpu_cache["cupy_pinned"])
+                    buf[:] = image.tobytes()
+
+                    # async copy pinned -> device
+                    src_dev = _gpu_cache["cupy_src"]
+                    dst_dev = _gpu_cache["cupy_dst"]
+                    # use stream for async copy and kernel
+                    with stream:
+                        # asynchronous copy from pinned host to device
+                        cp.cuda.runtime.memcpyAsync(
+                            src_dev.data.ptr,
+                            cp.cuda.runtime.get_device_pointer(buf),
+                            nbytes,
+                            cp.cuda.runtime.cudaMemcpyHostToDevice,
+                            stream.ptr
+                        )
+
+                        # launch kernel (grid/block choice)
+                        h_dst, w_dst = image.shape[0], image.shape[1]
+                        c = image.shape[2] if image.ndim == 3 else 1
+                        threads_x = 16
+                        threads_y = 16
+                        block = (threads_x, threads_y, 1)
+                        grid_x = (w_dst + threads_x - 1) // threads_x
+                        grid_y = (h_dst + threads_y - 1) // threads_y
+                        grid = (grid_x, grid_y, 1)
+
+                        CUPY_REMAP_KERNEL(grid, block,
+                                          (src_dev.ravel(), np.int32(src_dev.shape[0]), np.int32(src_dev.shape[1]), np.int32(c),
+                                           mapx_cp, mapy_cp, dst_dev.ravel(), np.int32(h_dst), np.int32(w_dst)))
+
+                    # synchronize stream before returning data to host
+                    stream.synchronize()
+                    out = cp.asnumpy(dst_dev)
                     return out
+
                 except Exception as e:
-                    _log(f"[WARN] CuPy remap kernel failed, falling back to CPU remap: {e}", log_func)
+                    _log(f"[WARN] CuPy remap kernel failed, fall back to CPU remap: {e}", log_func)
                     # fallthrough to CPU
 
-            # CPU fallback: use cv2.remap
+            # CPU fallback
             warped = cv2.remap(image,
                                map_x.astype(np.float32),
                                map_y.astype(np.float32),

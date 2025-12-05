@@ -2,7 +2,7 @@
 # ==============================
 # 仮想環境有効かコマンド
 # sovenv\Scripts\activate
-# 
+#
 # 使用するプロジェクトを変える際は、仮想環境を無効化してから行うこと
 # deactivate
 # ==============================
@@ -19,7 +19,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtCore import Qt
 
-from editor.grid_utils import sanitize_filename, auto_generate_from_environment
+# ★★★ 追加：get_virtual_id を import ★★★
+from editor.grid_utils import sanitize_filename, auto_generate_from_environment, get_virtual_id
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.join(BASE_DIR, "config")
@@ -47,13 +48,7 @@ def load_edit_profile():
 # --- ディスプレイの実機配置とPyQt名のマッピング ---
 # --- 動的ディスプレイ検出関数 ---
 def get_display_mapping():
-    """
-    接続されているスクリーンを x 座標順（左→右）に並べ、
-    '1','2','3',... のラベルを割り当てた dict を返す。
-    値は PyQt の screen.name()（例 '\\\\.\\DISPLAY6'）となる。
-    """
     screens = QGuiApplication.screens()
-    # sort by x coordinate (left -> right)
     sorted_screens = sorted(screens, key=lambda s: s.geometry().x())
     mapping = {}
     for idx, s in enumerate(sorted_screens, start=1):
@@ -104,18 +99,15 @@ class MainWindow(QMainWindow):
         save_edit_profile(self.edit_display_name)
 
     def init_projector_list(self):
-        """Windows番号順でリストを作成（実機の左→右を 1..N に割当）"""
         self.projector_list.clear()
-        display_map = get_display_mapping()  # 動的マッピングを取得
-        # store for later use (launch 等で同じ割当を使うため)
+        display_map = get_display_mapping()
         self.display_map = display_map
 
         for win_id, pyqt_name in display_map.items():
-            # 編集用ディスプレイは除外
             if pyqt_name == self.edit_display_name:
                 continue
             item = QListWidgetItem(f"ディスプレイ{win_id} ({pyqt_name})")
-            item.setData(Qt.UserRole, pyqt_name)  # 内部データとしてPyQt名を保持
+            item.setData(Qt.UserRole, pyqt_name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
             self.projector_list.addItem(item)
@@ -158,7 +150,6 @@ class MainWindow(QMainWindow):
         auto_generate_from_environment(mode=mode)
         self.launch_instruction_window(mode)
 
-        # ✅ チェックされたディスプレイだけ起動
         for i in range(self.projector_list.count()):
             item = self.projector_list.item(i)
             if item.checkState() == Qt.Checked:
@@ -174,7 +165,10 @@ class MainWindow(QMainWindow):
                 script_path = os.path.join(BASE_DIR, "editor",
                     "grid_editor_perspective.py" if mode == "perspective" else "grid_editor_warpmap.py"
                 )
-                lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(pyqt_name, mode)}.lock")
+
+                # ★★★ 修正：仮想IDで lock ファイル名を生成 ★★★
+                virt = get_virtual_id(pyqt_name)
+                lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(virt, mode)}.lock")
                 with open(lock_path, "w") as f:
                     f.write("active")
 
@@ -197,11 +191,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "保存対象のディスプレイが選択されていません")
             return
 
-        from editor.grid_utils import auto_generate_from_environment
         auto_generate_from_environment(mode=mode, displays=selected_names)
 
         for name in selected_names:
-            lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(name, mode)}.lock")
+            virt = get_virtual_id(name)
+            # ★★★ 修正：仮想ID仕様に統一 ★★★
+            lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(virt, mode)}.lock")
             if os.path.exists(lock_path):
                 os.remove(lock_path)
 
@@ -224,15 +219,17 @@ class MainWindow(QMainWindow):
         mode = self.mode_selector.currentText()
         source_display = self.edit_display_name
 
+        # ★★★ 修正：ターゲット名も仮想IDに変換して渡す ★★★
+        targets = [get_virtual_id(n) for n in selected_names]
+
         cmd = [
             sys.executable,
             os.path.join(BASE_DIR, "media_player_multi.py"),
             "--source", source_display,
-            "--targets", *selected_names,
+            "--targets", *targets,
             "--mode", mode,
         ]
 
-        # ✅ 複数ディスプレイならブレンド有効化
         if len(selected_names) > 1:
             cmd.append("--blend")
 
@@ -243,22 +240,18 @@ class MainWindow(QMainWindow):
 def is_gpu_available_main():
     try:
         import cupy as cp
-        # device count check
         cnt = cp.cuda.runtime.getDeviceCount()
         if cnt <= 0:
             return False
-        # quick sanity op
         _ = cp.array([1], dtype=cp.int32) * 2
         return True
     except Exception:
         return False
 
 
-# --- アプリ起動 ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # --- 起動時デバッグ出力 ---
     print("=== Display Mapping ===")
     screens = QGuiApplication.screens()
     for i, s in enumerate(screens):

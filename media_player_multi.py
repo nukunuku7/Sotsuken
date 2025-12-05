@@ -7,11 +7,12 @@ from PyQt5.QtWidgets import QApplication, QLabel, QWidget
 from PyQt5.QtGui import QImage, QPixmap, QGuiApplication
 from PyQt5.QtCore import QTimer, Qt
 
-from editor.grid_utils import load_points, log
+from editor.grid_utils import load_points, log, get_virtual_id
 from warp_engine import warp_image, prepare_warp
 
 # === GPU 自動検出 ==================================================
 try:
+    # cv2.cuda が使えるか確認
     import cv2.cuda as cuda
     GPU_AVAILABLE = cuda.getCudaEnabledDeviceCount() > 0
     if GPU_AVAILABLE:
@@ -55,8 +56,9 @@ class DisplayWindow(QWidget):
             "height": geom_src.height()
         }
 
-        # warp 情報
-        points_local = load_points(target_screen.name(), mode)
+        # warp 情報（ターゲット名は QScreen.name() か、media 側で仮想IDを解決して渡される）
+        vid = get_virtual_id(target_screen.name())
+        points_local = load_points(vid, mode)
         if not points_local:
             log(f"[WARN] グリッドが存在しないためスキップ: {target_screen.name()}")
             self.warp_info = None
@@ -69,7 +71,7 @@ class DisplayWindow(QWidget):
                 adjusted_points.append([x_adj, y_adj])
 
             self.warp_info = prepare_warp(
-                display_name=target_screen.name(),
+                display_name=vid,
                 mode=self.mode,
                 src_size=(geom_tgt.width(), geom_tgt.height()),
                 load_points_func=lambda *_: adjusted_points,
@@ -107,12 +109,15 @@ class DisplayWindow(QWidget):
 
         # === GPU resize ====================================
         if self.use_gpu:
-            gpu_frame = cuda_GpuMat = cuda_GpuMat = cuda_GpuMat = cuda_GpuMat
-            gpu_frame = cuda_GpuMat = cuda.GpuMat()
-            gpu_frame.upload(sub_cpu)
-
-            gpu_resized = cuda.resize(gpu_frame, (part_w, part_h))
-            resized = gpu_resized.download()
+            try:
+                # 正しい GPU パス：GpuMat を使って upload → cv2.cuda.resize → download
+                gsrc = cv2.cuda_GpuMat()
+                gsrc.upload(sub_cpu)
+                gresized = cv2.cuda.resize(gsrc, (part_w, part_h))
+                resized = gresized.download()
+            except Exception as e:
+                log(f"[WARN] GPU resize failed, fallback to CPU resize: {e}")
+                resized = cv2.resize(sub_cpu, (part_w, part_h), interpolation=cv2.INTER_LINEAR)
         else:
             resized = cv2.resize(sub_cpu, (part_w, part_h), interpolation=cv2.INTER_LINEAR)
         # ===================================================
@@ -152,26 +157,49 @@ def main():
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    screens = {s.name(): s for s in QGuiApplication.screens()}
 
-    if args.source not in screens:
+    # --- 入力された source / targets を内部IDに統一 ---
+    src_vid = get_virtual_id(args.source)
+    tgt_vids = [get_virtual_id(t) for t in args.targets]
+
+    if not src_vid:
+        print(f"❌ ソース {args.source} の内部ID変換に失敗")
+        sys.exit(1)
+
+    args.source = src_vid
+    args.targets = [t for t in tgt_vids if t]
+
+
+    # --- QScreen を名前別に取得（QScreen.name() と仮想ID の両方をキーにする） ---
+    screens_by_name = {}
+    # 追加で仮想 ID (D1, D2, ...) もキーにしておく（main.py から D* が渡されても解決できるように）
+    for s in QGuiApplication.screens():
+        vid = get_virtual_id(s.name())
+        if vid:
+            screens_by_name[vid] = s
+    # -------------------------------------------------------------------------
+
+    if args.source not in screens_by_name:
         print(f"❌ ソースディスプレイが見つかりません: {args.source}")
         sys.exit(1)
 
-    source_screen = screens[args.source]
-    total_width = sum(screens[n].geometry().width() for n in args.targets if n in screens)
-    max_height = max(screens[n].geometry().height() for n in screens if n in screens)
+    source_screen = screens_by_name[args.source]
+
+    # total_width は targets のうち見つかったスクリーン幅の合計
+    total_width = sum(screens_by_name[n].geometry().width() for n in args.targets if n in screens_by_name)
+    # max_height は利用可能なスクリーン全体の最大高さ（または targets の最大高さでも良い）
+    max_height = max((s.geometry().height() for s in screens_by_name.values()), default= source_screen.geometry().height())
     virtual_size = (total_width, max_height)
 
     windows = []
     offset_x = 0
 
     for name in args.targets:
-        if name not in screens:
+        if name not in screens_by_name:
             print(f"⚠️ ターゲットディスプレイが見つかりません: {name}")
             continue
 
-        target_screen = screens[name]
+        target_screen = screens_by_name[name]
         fade_enabled = args.blend and len(args.targets) > 1
 
         warp_info = prepare_warp(name, args.mode,

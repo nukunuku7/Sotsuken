@@ -13,6 +13,16 @@ except Exception:
 
 warp_cache = {}
 
+def _log(msg, log_func=None):
+    """ログを出力するための共通関数"""
+    if log_func:
+        try:
+            log_func(msg)
+        except Exception:
+            print(msg)
+    else:
+        print(msg)
+
 # --- GPU 検出: OpenCV CUDA と CuPy を試す --------------------------------
 USE_CV2_CUDA = False
 USE_CUPY = False
@@ -28,13 +38,15 @@ except Exception:
 
 try:
     import cupy as cp
-    # 簡易チェック: デバイスが使えるか
     try:
-        _ = cp.cuda.Device().id
+        dev = cp.cuda.Device()
+        _log(f"[CuPy] GPU device detected: {dev.id}")
         USE_CUPY = True
-    except Exception:
+    except Exception as e:
+        _log(f"[CuPy] GPU check failed: {e}")
         USE_CUPY = False
-except Exception:
+except Exception as e:
+    _log(f"[CuPy] import failed: {e}")
     USE_CUPY = False
 
 # Prepare a CuPy kernel for remap (bilinear) if cupy is available
@@ -91,9 +103,11 @@ if USE_CUPY:
     '''
     try:
         CUPY_REMAP_KERNEL = cp.RawKernel(remap_code, 'remap_bilinear')
-    except Exception:
+    except Exception as e:
+        _log(f"[CuPy] RawKernel compile failed: {e}")
         CUPY_REMAP_KERNEL = None
         USE_CUPY = False
+
 
 # --- GPU キャッシュ & 設定 -----------------------------------------------
 _gpu_cache = {
@@ -221,6 +235,17 @@ except Exception:
 
 # --- prepare_warp: 既存コード (省略せずそのまま使用) ---
 def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
+    # sanitize display name for file paths
+    safe_name = (
+        display_name.replace("(", "_")
+                    .replace(")", "_")
+                    .replace(" ", "_")
+                    .replace("-", "_")
+                    .replace("/", "_")
+    )
+
+    display_name = safe_name
+    
     _log(f"[prepare_warp] Display={display_name} Mode={mode} Size={src_size}", log_func)
     cache_key = (display_name, mode, src_size)
     if cache_key in warp_cache:

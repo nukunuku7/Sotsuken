@@ -157,3 +157,114 @@ environment_config = {
 ## 📄 ライセンス
 
 custom License
+
+---
+
+# 追加機能について
+
+## 🛠️ **GPU対応とCUDAビルドに関する設定**
+
+### 💻 GPU使用条件
+本プロジェクトでは、OpenCV の CUDA モジュールおよび CuPy を使用することで、GPU 上で高速に歪み補正処理を実行できます。ただし、以下の条件が揃っている必要があります：
+
+- NVIDIA GPU が搭載されていること  
+  （RTX 4070 Ti SUPER など、CUDA 対応 GPU）  
+- GPU ドライバーが対応する CUDA バージョンをサポートしていること  
+  （例：CUDA 12.3 で CuPy 13.2、OpenCV 4.x の CUDA ビルド）  
+- OpenCV が CUDA サポート付きでビルドされていること  
+
+#### ⚠️ 注意：
+- ドライバーや CUDA バージョンが不適合の場合、CPU モードで動作します。  
+- OpenCV の Python パッケージ（`opencv-python`）は通常 CPU ビルドのため、GPU 処理には **CUDA ビルド** が必須です。
+
+---
+
+### 🏗 CUDA ビルドが必要になる条件
+以下の条件に当てはまる場合は、OpenCV を CUDA 対応でビルドしてください：
+
+1. `cv2.cuda.getCudaEnabledDeviceCount()` が 0 を返す  
+2. 歪み補正処理をリアルタイムで行いたい  
+3. 複数ディスプレイや高解像度（1920x1080 × 複数）での出力が遅い  
+
+---
+
+### ⚙️ CUDA ビルド手順（Windows + Python）
+
+1. **依存ライブラリのインストール**
+```powershell
+# 必要なビルドツール
+choco install cmake
+choco install git
+```
+
+2. **OpenCV ソースコードの取得**
+
+```powershell
+git clone https://github.com/opencv/opencv.git
+git clone https://github.com/opencv/opencv_contrib.git
+```
+
+3. **CMake で CUDA ビルド設定**
+
+```powershell
+cd opencv
+mkdir build
+cd build
+cmake -G "Visual Studio 17 2022" ^
+      -A x64 ^
+      -D CMAKE_BUILD_TYPE=Release ^
+      -D CMAKE_INSTALL_PREFIX=..\install ^
+      -D OPENCV_EXTRA_MODULES_PATH=..\opencv_contrib\modules ^
+      -D WITH_CUDA=ON ^
+      -D CUDA_ARCH_BIN=86 ^             # RTX 4070 Ti に対応
+      -D BUILD_opencv_python3=ON ^
+      -D BUILD_EXAMPLES=OFF ..
+```
+
+4. **ビルド & インストール**
+
+```powershell
+cmake --build . --config Release --target INSTALL
+```
+
+5. **Python 環境にインストール**
+
+```powershell
+# install フォルダ内の cv2.pyd を仮想環境にコピーするか、
+# PYTHONPATH に追加
+set PYTHONPATH=%CD%\install\python;%PYTHONPATH%
+```
+
+---
+
+### ✅ 動作確認
+
+```python
+import cv2
+import cupy
+
+# CuPy デバイス確認
+print("CuPy devices:", cupy.cuda.runtime.getDeviceCount())
+
+# OpenCV CUDA デバイス確認
+print("cv2.cuda devices:", cv2.cuda.getCudaEnabledDeviceCount())
+```
+
+* 両方とも 1 以上を返せば GPU 処理が可能です
+* `0` を返す場合は、CUDA ビルドやドライバー、CUDA バージョンを再確認してください
+
+---
+
+### ⚡ GPU 利用上の注意
+
+* GPU 使用時は、他のアプリケーション（ブラウザ、VSCode など）が GPU メモリを占有していると、CUDA メモリ不足で CPU fallback になる場合があります
+* 複数ディスプレイ投影時は GPU メモリ消費が大きくなるため、RTX 4070 Ti 以上を推奨
+* CuPy + OpenCV CUDA は独立して GPU メモリを使用するため、併用時は余裕を持たせること
+
+---
+
+💡 **まとめ**
+
+* CPU モードでの動作も可能だが、リアルタイム性は落ちる
+* GPU を有効にするには OpenCV の CUDA ビルドと対応 GPU ドライバーが必須
+* CuPy は簡単に GPU 処理が確認できるため、まず CuPy が GPU を認識するかチェックすると良い

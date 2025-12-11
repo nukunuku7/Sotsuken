@@ -553,3 +553,27 @@ def warp_image(image, warp_info, log_func=None):
         else:
             print(f"[ERROR] warp_image failed: {e}")
         return image
+    
+
+# --- convert_maps_to_uv_texture_data: OpenGL用UVマップ変換 ---
+def convert_maps_to_uv_texture_data(map_x, map_y, width, height):
+    """
+    OpenCVのmap_x, map_y (pixel単位) を
+    OpenGL/ModernGL用のUVマップ (0.0~1.0正規化, float32, HxWx2) に変換する
+    """
+    # 正規化 (0.0 ~ 1.0)
+    # OpenCVの座標系に合わせて、範囲外の処理などをここで行うことも可能
+    u = map_x.astype(np.float32) / width
+    v = map_y.astype(np.float32) / height
+    
+    # (Height, Width, 2) の形状にスタックする
+    # channel 0 = u, channel 1 = v
+    uv_map = np.dstack((u, v))
+    
+    # OpenGLのテクスチャ座標系(左下原点)と画像の座標系(左上原点)の違いを吸収するため
+    # 必要に応じてYを反転するが、今回は画像自体をそのまま扱うため、
+    # シェーダー側でY反転するか、ここで調整する。
+    # 通常MSS取得画像とOpenCVマップの整合性を保つにはそのままで良い場合が多いが、
+    # 上下逆になる場合はここを v = 1.0 - v とする。
+    
+    return uv_map.astype('f4').tobytes()

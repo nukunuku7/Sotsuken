@@ -3,6 +3,8 @@ import argparse
 import cv2
 import numpy as np
 import mss
+import moderngl
+from PyQt5.QtWidgets import QOpenGLWidget
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget
 from PyQt5.QtGui import QImage, QPixmap, QGuiApplication
 from PyQt5.QtCore import QTimer, Qt
@@ -24,129 +26,130 @@ except Exception:
     log("△ CUDA が利用できないため CPUモードで動作します。")
 # ===================================================================
 
-
-class DisplayWindow(QWidget):
+class GLDisplayWindow(QOpenGLWidget):
     def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size,
                  warp_info_all=None, fade_enabled=False):
         super().__init__()
-        self.setWindowFlag(Qt.FramelessWindowHint)
+        # ウィンドウ設定
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
+        
+        # スクリーン配置
+        g = target_screen.geometry()
+        self.setGeometry(g.x(), g.y(), g.width(), g.height())
 
         self.source_screen = source_screen
-        self.target_screen = target_screen
-        self.mode = mode
+        self.warp_info_all = warp_info_all
         self.offset_x = offset_x
-        self.virtual_size = virtual_size
-        self.fade_enabled = fade_enabled
-        self.warp_info = warp_info_all
-        self.use_gpu = GPU_AVAILABLE  # === GPUフラグ ===
-
-        geom_tgt = target_screen.geometry()
-        self.setGeometry(geom_tgt)
-        self.label = QLabel(self)
-        self.label.setGeometry(0, 0, geom_tgt.width(), geom_tgt.height())
-
-        # キャプチャ設定
+        
+        # MSSの初期化 (キャプチャ範囲設定)
         self.sct = mss.mss()
-        geom_src = source_screen.geometry()
-        self.mon = {
-            "left": geom_src.x(),
-            "top": geom_src.y(),
-            "width": geom_src.width(),
-            "height": geom_src.height()
+        # source_screen の座標を取得
+        sg = source_screen.geometry()
+        # MSS用のキャプチャ領域辞書
+        self.monitor = {
+            "top": sg.y(),
+            "left": sg.x() + offset_x, # 担当エリアのオフセットを加算
+            "width": g.width(),        # 出力先の解像度と合わせる(前提)
+            "height": g.height()
         }
 
-        # warp 情報（ターゲット名は QScreen.name() か、media 側で仮想IDを解決して渡される）
-        vid = get_virtual_id(target_screen.name())
-        points_local = load_points(vid, mode)
-        if not points_local:
-            log(f"[WARN] グリッドが存在しないためスキップ: {target_screen.name()}")
-            self.warp_info = None
-        else:
-            total_w, total_h = virtual_size
-            adjusted_points = []
-            for p in points_local:
-                x_adj = p[0] + self.offset_x
-                y_adj = p[1]
-                adjusted_points.append([x_adj, y_adj])
-
-            self.warp_info = prepare_warp(
-                display_name=vid,
-                mode=self.mode,
-                src_size=(geom_tgt.width(), geom_tgt.height()),
-                load_points_func=lambda *_: adjusted_points,
-                log_func=log
-            )
-
-        # === 60fps に変更 =======
+        # フレームレート制御用タイマー (60FPS目標)
         self.timer = QTimer()
-        self.timer.timeout.connect(self.update_frame)
-        self.timer.start(16)  # 16ms = 60fps
-        # ========================
+        self.timer.timeout.connect(self.update) # update() が paintGL() を呼ぶ
+        self.timer.start(16) # 約60fps
 
-        self.showFullScreen()
+    def initializeGL(self):
+        """OpenGLの初期化：一度だけ呼ばれる"""
+        self.ctx = moderngl.create_context()
+        
+        # 1. 頂点データ（画面全体を覆う四角形）
+        # x, y, u, v
+        vertices = np.array([
+            -1.0, -1.0, 0.0, 1.0, # 左下 (画像座標系では左上に対応させるためVを反転等の調整が必要かも)
+             1.0, -1.0, 1.0, 1.0, # 右下
+            -1.0,  1.0, 0.0, 0.0, # 左上
+             1.0,  1.0, 1.0, 0.0, # 右上
+        ], dtype='f4')
+        
+        self.prog = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_vert;
+                in vec2 in_text;
+                out vec2 v_text;
+                void main() {
+                    gl_Position = vec4(in_vert, 0.0, 1.0);
+                    v_text = in_text;
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                uniform sampler2D original_tex;
+                uniform sampler2D warp_map_tex;
+                in vec2 v_text;
+                out vec4 f_color;
+                void main() {
+                    // UVマップから「本来参照すべき座標」を取得
+                    vec2 source_uv = texture(warp_map_tex, v_text).rg;
+                    
+                    // 座標が 0.0~1.0 の範囲外なら黒にする（クリッピング）
+                    if (source_uv.x < 0.0 || source_uv.x > 1.0 || source_uv.y < 0.0 || source_uv.y > 1.0) {
+                        f_color = vec4(0.0, 0.0, 0.0, 1.0);
+                    } else {
+                        // 元画像から色を取得
+                        f_color = texture(original_tex, source_uv);
+                    }
+                }
+            """
+        )
 
-    def update_frame(self):
-        raw = np.array(self.sct.grab(self.mon))
-        if raw is None or raw.size == 0:
-            return
+        # VBO / VAO 作成
+        self.vbo = self.ctx.buffer(vertices.tobytes())
+        self.vao = self.ctx.vertex_array(self.prog, [
+            (self.vbo, '2f 2f', 'in_vert', 'in_text')
+        ])
 
-        frame_cpu = cv2.cvtColor(raw[:, :, :3], cv2.COLOR_BGR2RGB)
-
-        total_w, total_h = self.virtual_size
-        geom_tgt = self.target_screen.geometry()
-        part_w, part_h = geom_tgt.width(), geom_tgt.height()
-
-        # === キャプチャ範囲：自分の担当 + 10% 重複 ===
-        blend_ratio = 0.10
-        overlap_px = int(part_w * blend_ratio)
-        x_start = int((self.offset_x / total_w) * frame_cpu.shape[1]) - overlap_px
-        x_end = int(((self.offset_x + part_w) / total_w) * frame_cpu.shape[1]) + overlap_px
-
-        x_start = max(0, x_start)
-        x_end = min(frame_cpu.shape[1], x_end)
-        sub_cpu = frame_cpu[:, x_start:x_end]
-
-        # === GPU resize ====================================
-        if self.use_gpu:
-            try:
-                # 正しい GPU パス：GpuMat を使って upload → cv2.cuda.resize → download
-                gsrc = cv2.cuda_GpuMat()
-                gsrc.upload(sub_cpu)
-                gresized = cv2.cuda.resize(gsrc, (part_w, part_h))
-                resized = gresized.download()
-            except Exception as e:
-                log(f"[WARN] GPU resize failed, fallback to CPU resize: {e}")
-                resized = cv2.resize(sub_cpu, (part_w, part_h), interpolation=cv2.INTER_LINEAR)
+        # 2. テクスチャ作成
+        w = self.monitor["width"]
+        h = self.monitor["height"]
+        
+        # 映像用テクスチャ (Binding 0)
+        self.texture_video = self.ctx.texture((w, h), 4) # BGRA=4ch
+        self.texture_video.swizzle = 'BGRx' # BGRA -> RGBへスウィズル(並び替え)
+        
+        # 歪み補正マップ用テクスチャ (Binding 1)
+        # warp_engine から map_x, map_y を取得済みと仮定
+        if self.warp_info_all:
+             map_x, map_y = self.warp_info_all
+             
+             # ★ここで手順2で作った変換関数を使う
+             from warp_engine import convert_maps_to_uv_texture_data
+             uv_data = convert_maps_to_uv_texture_data(map_x, map_y, w, h)
+             
+             self.texture_warp = self.ctx.texture((w, h), 2, data=uv_data, dtype='f4')
         else:
-            resized = cv2.resize(sub_cpu, (part_w, part_h), interpolation=cv2.INTER_LINEAR)
-        # ===================================================
+            # マップがない場合は恒等写像（歪みなし）を作る等の処理
+            self.texture_warp = self.ctx.texture((w, h), 2, dtype='f4') # 空
 
-        # === 歪み補正（warp_map は CPUのまま） ============
-        warped = warp_image(resized, warp_info=self.warp_info)
-        if warped is None:
-            return
+        # シェーダーにテクスチャ番号を教える
+        self.prog['original_tex'].value = 0
+        self.prog['warp_map_tex'].value = 1
 
-        # === フェード（CPU） ==============================
-        if self.fade_enabled:
-            h, w = warped.shape[:2]
-            fade = np.ones((h, w), dtype=np.float32)
-            blend_w = int(w * 0.10)
-
-            for x in range(blend_w):
-                alpha = x / float(blend_w)
-                fade[:, x] *= alpha
-                fade[:, -x - 1] *= alpha
-
-            warped = (warped.astype(np.float32) * fade[..., None]).astype(np.uint8)
-        # =================================================
-
-        # === 出力 ========================================
-        h, w, ch = warped.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(warped.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        self.label.setPixmap(QPixmap.fromImage(qt_image))
-
+    def paintGL(self):
+        """毎フレーム呼ばれる描画処理"""
+        # 1. 画面キャプチャ (CPU)
+        # MSSの grab は非常に高速ですが、ここのバイナリ取得だけが唯一のCPUコストです
+        sct_img = self.sct.grab(self.monitor)
+        
+        # 2. テクスチャ転送 (CPU -> GPU)
+        # 画像変換(opencv等)は一切せず、生バイト列をそのままGPUに投げ込む
+        self.texture_video.write(sct_img.raw)
+        
+        # 3. 描画実行 (GPU)
+        self.texture_video.use(0)
+        self.texture_warp.use(1)
+        self.vao.render(moderngl.TRIANGLE_STRIP)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -212,10 +215,11 @@ def main():
 
         print(f"🎥 {args.source} → {name} 出力 (fade={fade_enabled})")
 
-        window = DisplayWindow(
+        # DisplayWindow ではなく GLDisplayWindow を使用
+        window = GLDisplayWindow(
             source_screen, target_screen, args.mode,
             offset_x, virtual_size,
-            warp_info_all=warp_info,
+            warp_info_all=warp_info,  # prepare_warpの戻り値を渡す
             fade_enabled=fade_enabled
         )
         windows.append(window)

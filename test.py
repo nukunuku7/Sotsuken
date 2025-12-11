@@ -1,9 +1,5 @@
-import cupy
-print("CuPy version:", cupy.__version__)
-cupy.show_config()
+import sys
+sys.path.pop(0)  # カレントディレクトリを import path から除去
+import cv2
 
-import cupy.cuda.runtime as rt
-try:
-    print("Runtime version:", rt.runtimeGetVersion())
-except Exception as e:
-    print("runtimeGetVersion ERROR:", e)
+print(cv2.getBuildInformation())

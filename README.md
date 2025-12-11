@@ -192,10 +192,22 @@ custom License
 
 1. **依存ライブラリのインストール**
 ```powershell
+# 事前に管理者権限のpowershellで以下を実行
+Set-ExecutionPolicy Bypass -Scope Process -Force`
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; `
+iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+# 入った来夏で確認し、バージョンが表示されれば次を実行
+choco --version
+
 # 必要なビルドツール
 choco install cmake
 choco install git
 ```
+
+####　※この時点での注意事項
+cmakeがインストールされていなかった場合、以下のリンクからインストールしてください。
+https://cmake.org/download/
 
 2. **OpenCV ソースコードの取得**
 

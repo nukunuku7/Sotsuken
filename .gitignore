@@ -11,4 +11,4 @@ __pycache__/
 projector_profiles/*.json
 
 # tomlからのロックファイルも無視
-uv.lock
+*.lock

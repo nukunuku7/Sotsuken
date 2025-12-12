@@ -139,28 +139,59 @@ class MainWindow(QMainWindow):
     def launch_editors(self):
         mode = self.mode_selector.currentText()
 
-        selected_pyqt_names = []
-        for i in range(self.projector_list.count()):
-            item = self.projector_list.item(i)
-            if item.checkState() == Qt.Checked:
-                selected_pyqt_names.append(item.data(Qt.UserRole))
-
-        if not selected_pyqt_names:
+        # 選択されたディスプレイ名を取得
+        selected_items = [
+            self.projector_list.item(i)
+            for i in range(self.projector_list.count())
+            if self.projector_list.item(i).checkState() == Qt.Checked
+        ]
+        if not selected_items:
             QMessageBox.warning(self, "警告", "編集対象ディスプレイが選択されていません")
             return
 
-        # Only generate for selected displays (create only if missing)
-        auto_generate_from_environment(mode=mode, displays=selected_pyqt_names)
-
-        self.launch_instruction_window(mode)
-
-        for pyqt_name in selected_pyqt_names:
+        # ディスプレイ名とスクリーンX座標のリスト作成
+        selected_displays = []
+        for item in selected_items:
+            pyqt_name = item.data(Qt.UserRole)
             geom = None
             for screen in QGuiApplication.screens():
                 if screen.name() == pyqt_name:
                     geom = screen.geometry()
                     break
-            if geom is None:
+            if geom:
+                selected_displays.append((pyqt_name, geom.x()))
+
+        # 左→右順にソート
+        selected_displays.sort(key=lambda t: t[1])
+
+        # 選択ディスプレイの名前だけを抽出
+        sorted_names = [d[0] for d in selected_displays]
+
+        # まずJSONを生成（存在しない場合のみ）
+        auto_generate_from_environment(mode=mode, displays=sorted_names)
+
+        # 各ディスプレイの最初の点がマウスに引っ付くよう、順にセッション初期化
+        for pyqt_name in sorted_names:
+            virt = get_virtual_id(pyqt_name)
+            total_points = 4 if mode == "perspective" else 36
+            # grid_utils にあるセッション初期化関数（任意で作成済みなら呼び出す）
+            try:
+                from editor.grid_utils import init_editor_session
+                init_editor_session(virt, total_points)
+            except ImportError:
+                pass  # 関数未定義でもエラーにしない
+
+        # 説明ウィンドウ
+        self.launch_instruction_window(mode)
+
+        # 左→右順にエディター起動
+        for pyqt_name, _ in selected_displays:
+            geom = None
+            for screen in QGuiApplication.screens():
+                if screen.name() == pyqt_name:
+                    geom = screen.geometry()
+                    break
+            if not geom:
                 print(f"[WARN] 指定ディスプレイが見つかりません: {pyqt_name}")
                 continue
 
@@ -184,6 +215,10 @@ class MainWindow(QMainWindow):
                 "--w", str(geom.width()), "--h", str(geom.height())
             ]
             subprocess.Popen(cmd)
+
+            # 左→右順に少し待機して、次のディスプレイを起動
+            import time
+            time.sleep(0.5)  # 必要に応じて調整
 
     def force_save_grids(self, mode):
         selected_names = []

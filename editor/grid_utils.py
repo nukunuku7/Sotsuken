@@ -2,6 +2,8 @@
 import os
 import json
 import re
+import time
+import errno
 from datetime import datetime
 from PyQt5.QtGui import QGuiApplication
 
@@ -399,3 +401,222 @@ def auto_generate_from_environment(mode="warp_map", displays=None):
     for name in displays:
         create_display_grid(name, mode)
     print(f"🎉 選択ディスプレイ（{len(displays)}台）のグリッドを生成完了。")
+
+# temp dir for coordination (file-based IPC between editor processes)
+TEMP_DIR = os.path.join(ROOT_DIR, "temp")
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+def _atomic_write(path, data):
+    """Atomic write helper for small text/JSON files."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _write_json(path, obj):
+    _atomic_write(path, json.dumps(obj, ensure_ascii=False, indent=2))
+
+# queue file path (left-to-right order of virtual ids)
+def _queue_path():
+    return os.path.join(TEMP_DIR, "editor_queue.json")
+
+def _session_path(virt):
+    return os.path.join(TEMP_DIR, f"editor_session_{virt}.json")
+
+def create_editor_queue(pyqt_names):
+    """
+    Create the editor queue file from a list of PyQt display names.
+    The function normalizes to virtual IDs (D1...) and writes them left->right.
+    Overwrites any existing queue.
+    """
+    virts = []
+    for name in pyqt_names:
+        v = get_virtual_id(name)
+        virts.append(v)
+    # ensure order left-to-right by mapping using QGuiApplication screens
+    try:
+        screens = QGuiApplication.screens() or []
+        ordered = sorted(screens, key=lambda s: s.geometry().x())
+        ordered_names = [s.name() for s in ordered]
+        # sort virts by left-to-right according to screen order
+        def keyfn(v):
+            sn = virtual_to_screen_name(v) or v
+            try:
+                return ordered_names.index(sn)
+            except ValueError:
+                return 9999
+        virts = sorted(list(dict.fromkeys(virts)), key=keyfn)
+    except Exception:
+        pass
+
+    queue = {
+        "queue": virts,
+        "created_at": datetime.utcnow().isoformat()
+    }
+    _write_json(_queue_path(), queue)
+    log(f"[QUEUE] created queue: {virts}")
+    return virts
+
+def read_editor_queue():
+    q = _read_json(_queue_path())
+    if not q:
+        return []
+    return q.get("queue", [])
+
+def init_editor_session(virt, total_points):
+    """
+    Create a session file for a given virt.
+    Fields:
+      - virt
+      - total_points
+      - current_index  (next point index to be claimed; starts from 0)
+      - done_count     (how many points done)
+      - finished       (bool)
+      - last_update
+    """
+    path = _session_path(virt)
+    sess = {
+        "virt": virt,
+        "total_points": int(total_points),
+        "current_index": 0,
+        "done_count": 0,
+        "finished": False,
+        "last_update": datetime.utcnow().isoformat()
+    }
+    _write_json(path, sess)
+    log(f"[SESSION] init {virt} (total={total_points})")
+    return sess
+
+def get_session(virt):
+    path = _session_path(virt)
+    return _read_json(path)
+
+def claim_next_point(virt):
+    """
+    Try to claim the next point index for this virt.
+    Returns:
+      - integer index (0-based) if this editor is allowed to take the next point now
+      - None if it's not this editor's turn (queue prevents it)
+    Behavior:
+      - Only the virt at the head of the queue may claim points.
+      - Within its session, it will receive current_index and current_index will be left unchanged
+        until mark_point_done is called (so the editor knows which index to drag).
+    """
+    queue = read_editor_queue()
+    if not queue:
+        # no queue -> allow immediate claiming (single-editor mode)
+        q_head = None
+    else:
+        q_head = queue[0]
+
+    if q_head and q_head != virt:
+        # not our turn
+        return None
+
+    sess = get_session(virt)
+    if not sess:
+        return None
+
+    if sess.get("finished"):
+        return None
+
+    cur = int(sess.get("current_index", 0))
+    total = int(sess.get("total_points", 0))
+    if cur >= total:
+        # nothing left
+        return None
+
+    # return current index but do NOT advance it here;
+    # advance happens only when mark_point_done is called.
+    return cur
+
+def mark_point_done(virt, index):
+    """
+    Called by editor when the editing of index is completed (on_release).
+    Advances done_count and current_index.
+    If all points done, marks finished and pops virt from queue.
+    """
+    path = _session_path(virt)
+    sess = get_session(virt)
+    if not sess:
+        log(f"[SESSION] mark_point_done: no session for {virt}")
+        return
+
+    try:
+        total = int(sess.get("total_points", 0))
+        cur = int(sess.get("current_index", 0))
+        done = int(sess.get("done_count", 0))
+    except Exception:
+        log(f"[ERROR] invalid session values for {virt}")
+        return
+
+    # Ensure index matches expected (best-effort)
+    if index != cur:
+        # allow out-of-order but log
+        log(f"[SESSION] warning: {virt} reported done index {index} but current_index={cur}")
+
+    done += 1
+    cur += 1
+
+    sess["done_count"] = done
+    sess["current_index"] = cur
+    sess["last_update"] = datetime.utcnow().isoformat()
+    if cur >= total:
+        sess["finished"] = True
+
+    _write_json(path, sess)
+    log(f"[SESSION] {virt} done index={index} -> cur={cur}/{total}")
+
+    # If finished, advance queue
+    if sess.get("finished"):
+        _advance_queue_after_finish(virt)
+
+def _advance_queue_after_finish(virt):
+    """Internal: remove virt from head of queue (if present) when finished."""
+    p = _queue_path()
+    q = _read_json(p)
+    if not q:
+        return
+    queue = q.get("queue", [])
+    if queue and queue[0] == virt:
+        queue = queue[1:]
+        q["queue"] = queue
+        q["last_update"] = datetime.utcnow().isoformat()
+        _write_json(p, q)
+        log(f"[QUEUE] popped finished virt: {virt} -> next: {queue[:3]}")
+
+def mark_session_finished(virt):
+    """Force mark session as finished and advance queue."""
+    sess = get_session(virt)
+    if not sess:
+        return
+    sess["finished"] = True
+    sess["last_update"] = datetime.utcnow().isoformat()
+    _write_json(_session_path(virt), sess)
+    _advance_queue_after_finish(virt)
+
+def cleanup_sessions_and_queue():
+    """
+    Helper to remove stale session/queue files older than some threshold.
+    (Not called automatically — call from main for housekeeping if desired.)
+    """
+    now = time.time()
+    threshold = 60 * 60 * 24  # 1 day
+    # sessions
+    for f in os.listdir(TEMP_DIR):
+        if f.startswith("editor_session_") or f == "editor_queue.json":
+            p = os.path.join(TEMP_DIR, f)
+            try:
+                m = os.path.getmtime(p)
+                if now - m > threshold:
+                    os.remove(p)
+                    log(f"[CLEANUP] removed stale coordinator file: {f}")
+            except Exception:
+                pass

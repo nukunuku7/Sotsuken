@@ -18,7 +18,8 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 from editor.grid_utils import (
     save_points, load_points, generate_border_points,
-    get_virtual_id, get_point_path
+    get_virtual_id, get_point_path,
+    claim_next_point, mark_point_done
 )
 
 POINT_RADIUS = 6
@@ -34,13 +35,26 @@ class EditorCanvas(tk.Canvas):
 
         self.saved_once = False
         self.points = self.load_initial_points()
-        self.dragging_point = None
+
+        # --- 最初の点を自動でマウスに追従 ---
+        self.dragging_point = 0  # 最初の点
+        self.follow_mouse_loop()
 
         self.bind("<ButtonPress-1>", self.on_press)
         self.bind("<B1-Motion>", self.on_drag)
         self.bind("<ButtonRelease-1>", self.on_release)
 
         self.draw()
+
+    def follow_mouse_loop(self):
+        if self.dragging_point is not None:
+            x = self.winfo_pointerx() - self.winfo_rootx()
+            y = self.winfo_pointery() - self.winfo_rooty()
+            nx = max(0, min(self.w, x))
+            ny = max(0, min(self.h, y))
+            self.points[self.dragging_point] = [nx, ny]
+            self.draw()
+        self.after(10, self.follow_mouse_loop)  # 10ms ごとに更新
 
     def draw(self):
         self.delete("all")
@@ -73,7 +87,16 @@ class EditorCanvas(tk.Canvas):
             self.draw()
 
     def on_release(self, event):
-        self.dragging_point = None
+        if self.dragging_point is not None:
+            # 現在の点をセッションに記録
+            mark_point_done(self.virt, self.dragging_point)
+            
+            # 次の点を取得
+            next_index = claim_next_point(self.virt)
+            if next_index is not None:
+                self.dragging_point = next_index  # 次の点をマウスに追従
+            else:
+                self.dragging_point = None  # すべて完了
 
     def load_initial_points(self):
         existing = load_points(self.virt, mode="warp_map")

@@ -1,0 +1,30 @@
+[project]
+name = "Sotsuken"
+version = "0.1.0"
+
+requires-python = ">=3.10,<3.12"
+
+dependencies = [
+    # --- GPU/数値計算関連 ---
+    # CuPy: GPU検出のために維持
+    "cupy-cuda12x==12.3.0", 
+    "numpy",
+
+    # --- 画像・スクリーンキャプチャ関連 ---
+    # OpenCV: 歪み補正マップ生成（prepare_warp）のために必須
+    "opencv-python", 
+    # mss: スクリーンショット取得のために必須
+    "mss",
+
+    # --- GPU描画関連 (今回のリファクタリングで必須に追加) ---
+    # moderngl: GPUシェーダーベースの高性能描画に必須
+    "moderngl",
+    
+    # PyQt5 はご要望により除外しています
+    # uv sync --active
+    # を実行したのちにインストールしてください
+    # pip install PyQt5
+]
+
+[tool.uv]
+no-build-isolation = true

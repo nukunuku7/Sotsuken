@@ -27,7 +27,7 @@ POINT_RADIUS = 6
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
-        super().__init__(master, width=width, height=height, bg="black")
+        super().__init__(master, width=width, height=height, bg="#E0E0E0")
 
         self.display_name = display_name
         self.virt = get_virtual_id(display_name)
@@ -67,11 +67,11 @@ class EditorCanvas(tk.Canvas):
             self.create_oval(
                 x - POINT_RADIUS, y - POINT_RADIUS,
                 x + POINT_RADIUS, y + POINT_RADIUS,
-                fill="red"
+                fill="#CC0000"
             )
 
             x2, y2 = self.points[(i + 1) % len(self.points)]
-            self.create_line(x, y, x2, y2, fill="green", width=2)
+            self.create_line(x, y, x2, y2, fill="#003366", width=2)
 
     def on_press(self, event):
         for i, (x, y) in enumerate(self.points):

@@ -27,7 +27,7 @@ POINT_RADIUS = 8
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
-        super().__init__(master, width=width, height=height, bg="black")
+        super().__init__(master, width=width, height=height, bg= "#e0e0e0")
 
         self.display_name = display_name
         self.virt = get_virtual_id(display_name)
@@ -62,12 +62,12 @@ class EditorCanvas(tk.Canvas):
             return
         if len(self.points) >= 4:
             flat = [coord for p in self.points for coord in p]
-            self.create_polygon(*flat, outline="green", fill="", width=2)
+            self.create_polygon(*flat, outline="#003366", fill="", width=2)
 
         for x, y in self.points:
             self.create_oval(x - POINT_RADIUS, y - POINT_RADIUS,
                              x + POINT_RADIUS, y + POINT_RADIUS,
-                             fill="red")
+                             fill="#CC0000")
 
     def on_press(self, event):
         for i, (x, y) in enumerate(self.points):

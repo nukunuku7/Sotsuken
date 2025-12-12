@@ -9,3 +9,6 @@ __pycache__/
 
 # プロジェクター補との設定もここで設定するので無視
 projector_profiles/*.json
+
+# tomlからのロックファイルも無視
+uv.lock

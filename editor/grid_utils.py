@@ -23,6 +23,38 @@ def sanitize_filename(display_name: str, mode: str):
     safe = safe.strip("_")
     return f"{safe}_{mode}_points.json"
 
+# 外周36点の生成関数をここに統合
+def generate_border_points(width, height, divisions=10):
+    pts = []
+    step = 1.0 / (divisions - 1)
+
+    # top
+    for i in range(divisions):
+        x = width * (i * step)
+        y = 0
+        pts.append([x, y])
+
+    # right
+    for i in range(1, divisions - 1):
+        x = width
+        y = height * (i * step)
+        pts.append([x, y])
+
+    # bottom
+    for i in reversed(range(divisions)):
+        x = width * (i * step)
+        y = height
+        pts.append([x, y])
+
+    # left
+    for i in reversed(range(1, divisions - 1)):
+        x = 0
+        y = height * (i * step)
+        pts.append([x, y])
+
+    return pts
+
+
 # --- 仮想IDルール: 左から順に D1, D2, ... を振る ---
 def get_virtual_id(display_name: str) -> str:
     """
@@ -227,27 +259,53 @@ def get_screen_geometry(display_identifier: str):
 
     return 1920, 1080
 
-def generate_grid_points(display_name: str, cols: int = 10, rows: int = 10) -> list:
+def generate_grid_points(display_name: str, divisions: int = 10) -> list:
     """
-    Generate a centered grid based on the screen geometry.
-    display_name can be PyQt name or virtual ID.
+    Generate only BORDER POINTS inside a centered 10% rectangle.
+    (外周 36 点, 位置は画面中央の幅・高さ 10% の範囲)
     """
+
     w, h = get_screen_geometry(display_name)
-    scale = 0.10
+
+    # --- 中央10%の矩形を計算 ---
+    scale = 0.10  # 10%
     cx, cy = w / 2, h / 2
     half_w, half_h = (w * scale) / 2, (h * scale) / 2
+
     left, right = cx - half_w, cx + half_w
     top, bottom = cy - half_h, cy + half_h
 
-    points = []
-    for j in range(rows):
-        y = top + (bottom - top) * (j / (rows - 1))
-        for i in range(cols):
-            x = left + (right - left) * (i / (cols - 1))
-            points.append([x, y])
+    # --- 外周36点を生成（generate_border_points を改造して利用） ---
+    pts = []
 
-    log(f"[INIT_GRID] Display={display_name}  CenterGrid=({left:.1f},{top:.1f})~({right:.1f},{bottom:.1f})")
-    return points
+    step = 1.0 / (divisions - 1)
+
+    # top
+    for i in range(divisions):
+        x = left + (right - left) * (i * step)
+        y = top
+        pts.append([x, y])
+
+    # right
+    for i in range(1, divisions - 1):
+        x = right
+        y = top + (bottom - top) * (i * step)
+        pts.append([x, y])
+
+    # bottom
+    for i in reversed(range(divisions)):
+        x = left + (right - left) * (i * step)
+        y = bottom
+        pts.append([x, y])
+
+    # left
+    for i in reversed(range(1, divisions - 1)):
+        x = left
+        y = top + (bottom - top) * (i * step)
+        pts.append([x, y])
+
+    log(f"[INIT_BORDER] Display={display_name} Border10%Grid=({left:.1f},{top:.1f})~({right:.1f},{bottom:.1f}) → {len(pts)} points")
+    return pts
 
 def generate_perspective_points(display_name: str) -> list:
     """

@@ -1,4 +1,3 @@
-# editor/grid_editor_warpmap.py
 import argparse
 import tkinter as tk
 import sys
@@ -18,11 +17,12 @@ TEMP_DIR = Path(BASE_DIR) / "temp"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 from editor.grid_utils import (
-    generate_grid_points, save_points,
-    load_points, get_virtual_id, get_point_path
+    save_points, load_points, generate_border_points,
+    get_virtual_id, get_point_path
 )
 
 POINT_RADIUS = 6
+
 
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
@@ -32,9 +32,7 @@ class EditorCanvas(tk.Canvas):
         self.virt = get_virtual_id(display_name)
         self.w, self.h = width, height
 
-        # --- Save only once ---
         self.saved_once = False
-
         self.points = self.load_initial_points()
         self.dragging_point = None
 
@@ -51,9 +49,12 @@ class EditorCanvas(tk.Canvas):
 
         for i in range(len(self.points)):
             x, y = self.points[i]
-            self.create_oval(x - POINT_RADIUS, y - POINT_RADIUS,
-                             x + POINT_RADIUS, y + POINT_RADIUS,
-                             fill="red")
+
+            self.create_oval(
+                x - POINT_RADIUS, y - POINT_RADIUS,
+                x + POINT_RADIUS, y + POINT_RADIUS,
+                fill="red"
+            )
 
             x2, y2 = self.points[(i + 1) % len(self.points)]
             self.create_line(x, y, x2, y2, fill="green", width=2)
@@ -77,20 +78,21 @@ class EditorCanvas(tk.Canvas):
     def load_initial_points(self):
         existing = load_points(self.virt, mode="warp_map")
         if existing:
-            return existing
+            return existing  # ← 36点が入っていればそのまま
 
-        pts = generate_grid_points(self.virt)
+        # 外周36点を生成
+        pts = generate_border_points(self.w, self.h, divisions=10)
         save_points(self.virt, pts, mode="warp_map")
         return pts
 
     def save(self):
-        """Save only once."""
         if self.saved_once:
             return
         self.saved_once = True
 
         save_points(self.virt, self.points, mode="warp_map")
         print(f"保存: {get_point_path(self.virt, 'warp_map')}")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -126,7 +128,6 @@ def main():
                     canvas.save()
                 except Exception as e:
                     print(f"[ERROR] save failed: {e}")
-
                 try:
                     root.destroy()
                 except:
@@ -135,6 +136,7 @@ def main():
 
     threading.Thread(target=watch_lock, daemon=True).start()
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

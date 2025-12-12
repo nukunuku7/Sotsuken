@@ -1,12 +1,11 @@
-# grid_editor_perspective.py
-
+# editor/grid_editor_perspective.py
 import argparse
 import tkinter as tk
-import json
 import sys
 import os
 import threading
 import time
+from pathlib import Path
 
 def ensure_module_path():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,12 +14,12 @@ def ensure_module_path():
     return base_dir
 
 BASE_DIR = ensure_module_path()
-TEMP_DIR = os.path.join(BASE_DIR, "temp")
-os.makedirs(TEMP_DIR, exist_ok=True)
+TEMP_DIR = Path(BASE_DIR) / "temp"
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 from editor.grid_utils import (
     generate_perspective_points, save_points,
-    get_point_path, sanitize_filename
+    load_points, get_virtual_id, get_point_path
 )
 
 POINT_RADIUS = 8
@@ -28,21 +27,35 @@ POINT_RADIUS = 8
 class EditorCanvas(tk.Canvas):
     def __init__(self, master, display_name, width, height):
         super().__init__(master, width=width, height=height, bg="black")
+
         self.display_name = display_name
+        self.virt = get_virtual_id(display_name)
         self.w, self.h = width, height
+
+        # --- Save is allowed only once ---
+        self.saved_once = False
+
         self.points = self.load_initial_points()
         self.dragging_point = None
+
         self.bind("<ButtonPress-1>", self.on_press)
         self.bind("<B1-Motion>", self.on_drag)
         self.bind("<ButtonRelease-1>", self.on_release)
+
         self.draw()
 
     def draw(self):
         self.delete("all")
-        self.create_polygon(*sum(self.points, []), outline="green", fill="", width=2)
+        if not self.points:
+            return
+        if len(self.points) >= 4:
+            flat = [coord for p in self.points for coord in p]
+            self.create_polygon(*flat, outline="green", fill="", width=2)
+
         for x, y in self.points:
             self.create_oval(x - POINT_RADIUS, y - POINT_RADIUS,
-                             x + POINT_RADIUS, y + POINT_RADIUS, fill="red")
+                             x + POINT_RADIUS, y + POINT_RADIUS,
+                             fill="red")
 
     def on_press(self, event):
         for i, (x, y) in enumerate(self.points):
@@ -52,30 +65,39 @@ class EditorCanvas(tk.Canvas):
 
     def on_drag(self, event):
         if self.dragging_point is not None:
-            self.points[self.dragging_point] = [event.x, event.y]
+            nx = max(0, min(self.w, event.x))
+            ny = max(0, min(self.h, event.y))
+            self.points[self.dragging_point] = [nx, ny]
             self.draw()
 
     def on_release(self, event):
         self.dragging_point = None
 
     def load_initial_points(self):
-        path = get_point_path(self.display_name, mode="perspective")
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return generate_perspective_points(self.display_name)
+        existing = load_points(self.virt, mode="perspective")
+        if existing:
+            return existing
+
+        pts = generate_perspective_points(self.virt)
+        save_points(self.virt, pts, mode="perspective")
+        return pts
 
     def save(self):
-        save_points(self.display_name, self.points, mode="perspective")
-        print(f"✅ 保存: {get_point_path(self.display_name, mode='perspective')}")
+        """Ensure save only once."""
+        if self.saved_once:
+            return
+        self.saved_once = True
+
+        save_points(self.virt, self.points, mode="perspective")
+        print(f"保存: {get_point_path(self.virt, 'perspective')}")
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--display", required=True)
-    parser.add_argument("--x", type=int)
-    parser.add_argument("--y", type=int)
-    parser.add_argument("--w", type=int)
-    parser.add_argument("--h", type=int)
+    parser.add_argument("--x", type=int, default=0)
+    parser.add_argument("--y", type=int, default=0)
+    parser.add_argument("--w", type=int, default=1920)
+    parser.add_argument("--h", type=int, default=1080)
     args = parser.parse_args()
 
     root = tk.Tk()
@@ -85,16 +107,31 @@ def main():
 
     frame = tk.Frame(root)
     frame.pack(fill="both", expand=True)
+
     canvas = EditorCanvas(frame, args.display, args.w, args.h)
     canvas.pack(fill="both", expand=True)
 
-    lock_path = os.path.join(TEMP_DIR, f"editor_active_{sanitize_filename(args.display, 'perspective')}.lock")
+    virt = get_virtual_id(args.display)
+    lock_path = TEMP_DIR / f"editor_active_{virt}_perspective.lock"
+
+    # create lock
+    with open(lock_path, "w", encoding="utf-8") as f:
+        f.write("active")
+
     def watch_lock():
+        """Check lock. When removed, save once and exit."""
         while True:
-            time.sleep(0.5)
-            if not os.path.exists(lock_path):
-                canvas.save()
-                root.destroy()
+            time.sleep(0.3)
+            if not lock_path.exists():
+                try:
+                    canvas.save()
+                except Exception as e:
+                    print(f"[ERROR] save failed: {e}")
+
+                try:
+                    root.destroy()
+                except:
+                    pass
                 break
 
     threading.Thread(target=watch_lock, daemon=True).start()

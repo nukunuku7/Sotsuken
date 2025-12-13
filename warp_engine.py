@@ -190,14 +190,21 @@ except Exception:
 
 
 # --- prepare_warp: 歪み補正マップ生成のコア機能 ---
-def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
+def prepare_warp(display_name, mode, src_size, src_offset_x=0, load_points_func=None, log_func=None):
     """
     指定されたディスプレイとモードに基づき、歪み補正用のマップ (map_x, map_y) を生成またはロードする。
+
+    ※ 注意:
+    - この関数は「1画面（1プロジェクター）= 1ローカル座標系」を前提とする
+    - n分割（slice）やオフセット処理は GL / 描画側の責務
+    - src_offset_x は設計変更により使用しない（互換性のため引数のみ残す）
     
     戻り値: (map_x, map_y) のタプル (numpy.ndarray, float32)
     """
-    
+
+    # ------------------------------------------------------------
     # 1. キャッシュチェック
+    # ------------------------------------------------------------
     cache_key = (display_name, mode, src_size)
     if cache_key in warp_cache:
         _log("[cache] hit", log_func)
@@ -205,52 +212,81 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
 
     w_out, h_out = int(src_size[0]), int(src_size[1])
 
-    # --- Mode 1: perspective (簡易射影変換) ---
+    # ============================================================
+    # Mode 1: perspective（簡易射影変換）
+    # ============================================================
     if mode == "perspective":
-        # 1-1. 設定点 (4点) のロード
+
+        # --------------------------------------------------------
+        # 1-1. 設定点（4点）のロード
+        # --------------------------------------------------------
         if load_points_func:
-            # 外部関数 (grid_utils.load_points) を利用してロード
             pts = load_points_func(display_name, mode)
         else:
-            # フォールバック: ファイルから直接ロード
-            cfg_path = os.path.join("config", "projector_profiles", f"__.__{display_name}_{mode}_points.json")
+            cfg_path = os.path.join(
+                "config", "projector_profiles",
+                f"__.__{display_name}_{mode}_points.json"
+            )
             if not os.path.exists(cfg_path):
                 _log(f"[WARN] perspective grid file not found: {cfg_path}", log_func)
                 return None
             with open(cfg_path, "r", encoding="utf-8") as f:
                 pts = json.load(f)
-                
+
         if pts is None or len(pts) < 4:
             _log("[WARN] perspective points missing or insufficient (<4)", log_func)
             return None
-            
+
+        # --------------------------------------------------------
         # 1-2. 射影変換行列の生成
+        # --------------------------------------------------------
         matrix = generate_perspective_matrix(src_size, pts[:4])
 
-        # 1-3. 行列から OpenCV remap 形式の座標マップ (map_x, map_y) を生成
-        
-        # 恒等写像 (出力画像のピクセル座標 X/Y) を作成
-        map_y_identity, map_x_identity = np.indices((h_out, w_out), dtype=np.float32)
-        
-        # warpPerspective を適用して、各出力ピクセルが「元画像上のどこを参照すべきか」を計算
-        map_x = cv2.warpPerspective(map_x_identity, matrix, src_size, flags=cv2.INTER_LINEAR)
-        map_y = cv2.warpPerspective(map_y_identity, matrix, src_size, flags=cv2.INTER_LINEAR)
-        
-        # OpenCVのremap関数形式に変換 (CV_32FC1形式に変換される)
-        # map_x, map_y = cv2.convertMaps(map_x_warped, map_y_warped, cv2.CV_32FC1)
-        # ★ convertMaps が不要なケース（マップが既に float32 の 1ch の場合）もあるが、
-        # 念のため元のコードの意図を汲んで map_x, map_y は float32 にしておく
+        # --------------------------------------------------------
+        # 1-3. OpenCV remap 用マップ生成
+        # --------------------------------------------------------
+        # 恒等写像（出力側ピクセル座標）
+        map_y_identity, map_x_identity = np.indices(
+            (h_out, w_out), dtype=np.float32
+        )
+
+        # 各出力ピクセルが「元画像のどこを見るか」を計算
+        map_x = cv2.warpPerspective(
+            map_x_identity, matrix, src_size, flags=cv2.INTER_LINEAR
+        )
+        map_y = cv2.warpPerspective(
+            map_y_identity, matrix, src_size, flags=cv2.INTER_LINEAR
+        )
+
+        # --------------------------------------------------------
+        # ★ 旧設計（n分割前提）の名残：使用しない
+        # --------------------------------------------------------
+        # if src_offset_x != 0:
+        #     map_x = map_x - float(src_offset_x)
+
+        # 範囲外を安全に潰す
+        map_x[map_x < 0] = 0.0
+        map_x[map_x > (w_out - 1)] = 0.0
+        map_y[map_y < 0] = 0.0
+        map_y[map_y > (h_out - 1)] = 0.0
+
         map_x = map_x.astype(np.float32)
         map_y = map_y.astype(np.float32)
+
+        # if src_offset_x != 0:
+        #     map_x = map_x + float(src_offset_x)
 
         warp_cache[cache_key] = (map_x, map_y)
         _log(f"[OK] perspective map prepared for {display_name}", log_func)
         return map_x, map_y
 
-    # --- Mode 2: warp_map (3Dシミュレーションに基づく歪み補正) ---
+    # ============================================================
+    # Mode 2: warp_map（3Dシミュレーション）
+    # ============================================================
     elif mode == "warp_map":
+
         if environment_config is None:
-            _log("[ERROR] environment_config not available. Place config/environment_config.py", log_func)
+            _log("[ERROR] environment_config not available.", log_func)
             return None
 
         if display_name not in DISPLAY_TO_SIMSET:
@@ -264,10 +300,9 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
             _log(f"[ERROR] cannot access simulation set {sim_idx}: {e}", log_func)
             return None
 
-        # シミュレーション設定の取得
         proj = sim_set.get("projector")
         mirror = sim_set.get("mirror")
-        screen = sim_set.get("screen", None)
+        screen = sim_set.get("screen")
         if not proj or not mirror or not screen:
             _log("[WARN] incomplete sim set (need projector/mirror/screen)", log_func)
             return None
@@ -276,126 +311,111 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         proj_dir = _normalize(np.array(proj["direction"], dtype=np.float64))
         fov_h = float(proj.get("fov_h", 53.13))
         fov_v = float(proj.get("fov_v", fov_h))
-        # 参照元（プロジェクター）の解像度
-        proj_resolution = tuple(proj.get("resolution", [w_out, h_out])) 
 
-        # 台形補正 (Keystone) 処理 (あれば適用)
+        # ★ 1画面 = 1解像度（sliceはGL側で処理）
+        proj_resolution = (w_out, h_out)
+
+        # if src_offset_x != 0:
+        #     map_x = map_x + float(src_offset_x)
+
+        # --------------------------------------------------------
+        # 以下、元ロジックそのまま（数式・構造は変更なし）
+        # --------------------------------------------------------
         keystone_v = float(proj.get("keystone_v", 0.0))
         if abs(keystone_v) > 1e-6:
-            # 簡略化のため、キーストーン処理の詳細は省略（元のロジックを保持）
             default_up = np.array([0.0, 0.0, 1.0])
             if abs(np.dot(default_up, proj_dir)) > 0.99:
                 default_up = np.array([0.0, 1.0, 0.0])
             right = _normalize(np.cross(proj_dir, default_up))
             up = _normalize(np.cross(right, proj_dir))
             theta = math.radians(keystone_v)
-            cos_t = math.cos(theta)
-            sin_t = math.sin(theta)
-            # 新しい投影方向を計算
             proj_dir = _normalize(
-                proj_dir * cos_t +
-                np.cross(right, proj_dir) * sin_t +
-                right * np.dot(right, proj_dir) * (1 - cos_t)
+                proj_dir * math.cos(theta) +
+                np.cross(right, proj_dir) * math.sin(theta) +
+                right * np.dot(right, proj_dir) * (1 - math.cos(theta))
             )
             _log(f"[keystone] vertical keystone applied: {keystone_v} deg", log_func)
 
-        # 3D点群データの取得
         mirror_pts = np.array(mirror.get("vertices", []), dtype=np.float64)
         screen_pts = np.array(screen.get("vertices", []), dtype=np.float64)
         if mirror_pts.size == 0 or screen_pts.size == 0:
             _log("[WARN] mirror or screen point cloud empty", log_func)
             return None
 
-        # スクリーン平面のパラメータ計算
         screen_centroid, screen_u, screen_v, screen_normal = _fit_plane(screen_pts)
-        uv_coords = np.stack([np.dot(screen_pts - screen_centroid, screen_u),
-                              np.dot(screen_pts - screen_centroid, screen_v)], axis=1)
+        uv_coords = np.stack([
+            np.dot(screen_pts - screen_centroid, screen_u),
+            np.dot(screen_pts - screen_centroid, screen_v)
+        ], axis=1)
         u_min, v_min = uv_coords.min(axis=0)
         u_max, v_max = uv_coords.max(axis=0)
 
-        # 法線ベクトルの推定
         try:
-            mirror_normals = _estimate_normals_for_pointcloud(mirror_pts, sample_stride=1, k=16)
+            mirror_normals = _estimate_normals_for_pointcloud(
+                mirror_pts, sample_stride=1, k=16
+            )
         except Exception:
-            mirror_normals = np.tile(np.array([0,0,1.0]), (len(mirror_pts),1))
+            mirror_normals = np.tile(np.array([0, 0, 1.0]), (len(mirror_pts), 1))
 
-        # 角度計算用
         fov_h_rad = math.radians(fov_h)
         fov_v_rad = math.radians(fov_v)
-        
-        # 投影方向を計算するための基準ベクトル
+
         default_up = np.array([0.0, 0.0, 1.0])
         if abs(np.dot(default_up, proj_dir)) > 0.99:
             default_up = np.array([0.0, 1.0, 0.0])
         right = _normalize(np.cross(proj_dir, default_up))
         up = _normalize(np.cross(right, proj_dir))
 
-        # 座標マップ (map_x, map_y) を初期化
         map_x = np.zeros((h_out, w_out), dtype=np.float32)
         map_y = np.zeros((h_out, w_out), dtype=np.float32)
-        
-        # --- レイキャスティングによるマップ生成 ---
+
         for yy in range(h_out):
-            # 垂直方向の画角を計算
-            v = ( (yy + 0.5) / h_out - 0.5 ) * fov_v_rad
+            v = ((yy + 0.5) / h_out - 0.5) * fov_v_rad
             for xx in range(w_out):
-                # 水平方向の画角を計算
-                u = ( (xx + 0.5) / w_out - 0.5 ) * fov_h_rad
-                
-                # 画面のピクセル(xx, yy)から伸びるレイの方向 dir_cam を計算
-                dir_cam = (_normalize(proj_dir) * 1.0 +
-                             right * math.tan(u) +
-                             up * math.tan(v))
-                dir_cam = _normalize(dir_cam)
+                u = ((xx + 0.5) / w_out - 0.5) * fov_h_rad
+                dir_cam = _normalize(
+                    proj_dir + right * math.tan(u) + up * math.tan(v)
+                )
 
-                # 1. レイとミラー点群との交差判定
-                mirror_hit_pt, t_m, dist_m = _nearest_along_ray(proj_origin, dir_cam, mirror_pts, t_min=0.01, t_max=10.0)
+                mirror_hit_pt, _, _ = _nearest_along_ray(
+                    proj_origin, dir_cam, mirror_pts, 0.01, 10.0
+                )
                 if mirror_hit_pt is None:
-                    continue # 外側は(0, 0)のまま
+                    continue
 
-                # 2. ミラー反射
-                diffs = mirror_pts - mirror_hit_pt[None,:]
+                diffs = mirror_pts - mirror_hit_pt[None, :]
                 idx = int(np.argmin(np.linalg.norm(diffs, axis=1)))
                 n = mirror_normals[idx]
                 if np.linalg.norm(n) == 0:
-                    n = screen_normal # 法線が計算できない場合のフォールバック
+                    n = screen_normal
 
-                refl = _reflect(dir_cam, n) # 反射光の方向
+                refl = _reflect(dir_cam, n)
 
-                # 3. 反射レイとスクリーン点群との交差判定
-                screen_hit_pt, t_s, dist_s = _nearest_along_ray(mirror_hit_pt + refl * 1e-6, refl, screen_pts, t_min=0.01, t_max=10.0)
+                screen_hit_pt, _, _ = _nearest_along_ray(
+                    mirror_hit_pt + refl * 1e-6, refl, screen_pts, 0.01, 10.0
+                )
                 if screen_hit_pt is None:
-                    continue # 外側は(0, 0)のまま
+                    continue
 
-                # 4. スクリーン上のヒット位置をUV座標 (0.0～1.0) に変換
                 rel = screen_hit_pt - screen_centroid
                 ucoord = float(np.dot(rel, screen_u))
                 vcoord = float(np.dot(rel, screen_v))
 
                 if (u_max - u_min) == 0 or (v_max - v_min) == 0:
-                    continue # サイズがない場合はスキップ
+                    continue
 
-                # UV座標を 0.0～1.0 に正規化
                 fx = (ucoord - u_min) / (u_max - u_min)
                 fy = (vcoord - v_min) / (v_max - v_min)
 
-                if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
-                    continue # 0～1の範囲外はスキップ（外側は(0, 0)のまま）
-                else:
-                    # 正規化UV座標をピクセル座標に戻し、マップに格納
-                    # sx: Xピクセル (0～W-1)
-                    # sy: Yピクセル (0～H-1), Y軸は反転して格納 (OpenGLのシェーダーで調整可能)
-                    sx = fx * (proj_resolution[0] - 1)
-                    sy = (1.0 - fy) * (proj_resolution[1] - 1) # Y軸を反転 (画像座標系に合わせる)
-                    
-                    map_x[yy, xx] = float(sx)
-                    map_y[yy, xx] = float(sy)
+                if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
+                    map_x[yy, xx] = fx * (proj_resolution[0] - 1)
+                    map_y[yy, xx] = (1.0 - fy) * (proj_resolution[1] - 1)
 
         warp_cache[cache_key] = (map_x, map_y)
         _log(f"[OK] warp_map prepared for {display_name} ({w_out}x{h_out})", log_func)
         return map_x, map_y
-    
-    return None # モードが不明な場合
+
+    return None
 
 
 # --- convert_maps_to_uv_texture_data: OpenGL用UVマップ変換 ---

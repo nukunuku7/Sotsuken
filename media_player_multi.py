@@ -13,26 +13,32 @@ from editor.grid_utils import load_points, log, get_virtual_id
 from warp_engine import prepare_warp
 
 
+# ============================================================
+# OpenGL Window
+# ============================================================
 class GLDisplayWindow(QOpenGLWidget):
-    def __init__(self, source_screen, target_screen, warp_info):
+    def __init__(self, source_screen, target_screen,
+                 slice_offset_x, slice_size, warp_info):
         super().__init__()
 
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
+        # --- 表示先（プロジェクター）全画面
         g = target_screen.geometry()
         self.setGeometry(g.x(), g.y(), g.width(), g.height())
+
+        self.source_screen = source_screen
+        self.slice_offset_x = slice_offset_x   # ★ 将来用（現在は未使用）
+        self.slice_size = slice_size
+        self.warp_info = warp_info
 
         self.target_width = g.width()
         self.target_height = g.height()
 
-        self.source_screen = source_screen
-        self.warp_info = warp_info
-
+        # --- MSS（編集画面全体をキャプチャ）
         self.sct = mss.mss()
         sg = source_screen.geometry()
-
-        # ★ 編集用ディスプレイ全体を常にキャプチャ
         self.monitor = {
             "top": sg.y(),
             "left": sg.x(),
@@ -44,6 +50,9 @@ class GLDisplayWindow(QOpenGLWidget):
         self.timer.timeout.connect(self.update)
         self.timer.start(8)  # ~120fps
 
+    # ------------------------------------------------------------
+    # OpenGL 初期化
+    # ------------------------------------------------------------
     def initializeGL(self):
         self.ctx = moderngl.create_context()
 
@@ -91,17 +100,19 @@ class GLDisplayWindow(QOpenGLWidget):
             self.prog, [(self.vbo, "2f 2f", "in_vert", "in_text")]
         )
 
-        # --- 映像テクスチャ（編集用ディスプレイ全体）
+        # --- 編集画面全体テクスチャ
         sg = self.source_screen.geometry()
-        self.video_tex = self.ctx.texture((sg.width(), sg.height()), 4)
+        self.video_tex = self.ctx.texture(
+            (sg.width(), sg.height()), 4
+        )
         self.video_tex.swizzle = "BGRA"
         self.video_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
 
-        # --- warp map（短冊）
+        # --- warp map（常に slice サイズ基準）
         map_x, map_y = self.warp_info
         uv = np.dstack([
-            map_x / float(sg.width()),
-            map_y / float(sg.height())
+            map_x / float(self.slice_size[0]),
+            map_y / float(self.slice_size[1])
         ]).astype("f4")
 
         h, w = map_x.shape
@@ -111,6 +122,9 @@ class GLDisplayWindow(QOpenGLWidget):
         self.prog["video_tex"].value = 0
         self.prog["warp_tex"].value = 1
 
+    # ------------------------------------------------------------
+    # 描画
+    # ------------------------------------------------------------
     def paintGL(self):
         img = self.sct.grab(self.monitor)
         self.video_tex.write(img.raw)
@@ -119,11 +133,15 @@ class GLDisplayWindow(QOpenGLWidget):
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
 
+# ============================================================
+# Main
+# ============================================================
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
     parser.add_argument("--targets", nargs="+", required=True)
     parser.add_argument("--mode", default="warp_map")
+    parser.add_argument("--blend", action="store_true")  # 将来拡張用
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -132,36 +150,33 @@ def main():
     screens = {get_virtual_id(s.name()): s for s in QGuiApplication.screens()}
     source = screens[get_virtual_id(args.source)]
 
+    src_geo = source.geometry()
     num_targets = len(args.targets)
-    source_w = source.geometry().width()
-    source_h = source.geometry().height()
 
-    slice_w = source_w // num_targets
+    slice_w = src_geo.width() // num_targets
+    slice_h = src_geo.height()
 
     windows = []
 
     for i, t in enumerate(args.targets):
         scr = screens[get_virtual_id(t)]
-        w = scr.geometry().width()
-        h = scr.geometry().height()
 
-        full_map_x, full_map_y = prepare_warp(
+        offset_x = i * slice_w  # ★ 将来用（warp では使用しない）
+
+        map_x, map_y = prepare_warp(
             t,
             args.mode,
-            src_size=(source_w, source_h),
+            src_size=(slice_w, slice_h),
+            # src_offset_x=offset_x,  # ← 設計変更により不使用
             load_points_func=load_points,
             log_func=log
         )
 
-        x0 = i * slice_w
-        x1 = x0 + slice_w
-
-        map_x = full_map_x[:h, x0:x1]
-        map_y = full_map_y[:h, x0:x1]
-
         win = GLDisplayWindow(
             source,
             scr,
+            offset_x,
+            (slice_w, slice_h),
             (map_x, map_y)
         )
         win.show()

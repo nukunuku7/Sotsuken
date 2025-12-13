@@ -17,6 +17,17 @@ except Exception:
 # グローバルなキャッシュ辞書
 warp_cache = {}
 
+def _log(msg, log_func=None):
+    """ログを出力するための共通関数。外部のロガーが利用可能ならそちらを使用。"""
+    if log_func:
+        try:
+            log_func(msg)
+        except Exception:
+            print(msg)
+    else:
+        print(msg)
+
+# ディスプレイとシミュレーションセットの自動割り当て関数
 def auto_assign_simsets(log_func=None):
     """
     ディスプレイの左→右順に ScreenSimulatorSet_x を自動割り当て。
@@ -60,16 +71,6 @@ def auto_assign_simsets(log_func=None):
 
 # 起動時に自動割り当て
 auto_assign_simsets()
-
-def _log(msg, log_func=None):
-    """ログを出力するための共通関数。外部のロガーが利用可能ならそちらを使用。"""
-    if log_func:
-        try:
-            log_func(msg)
-        except Exception:
-            print(msg)
-    else:
-        print(msg)
 
 # --- ジオメトリ計算ヘルパー関数 (warp_mapモード用) --------------------------------
 

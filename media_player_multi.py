@@ -1,4 +1,3 @@
-# media_player_multi.py
 import sys
 import argparse
 import numpy as np
@@ -15,8 +14,7 @@ from warp_engine import prepare_warp
 
 
 class GLDisplayWindow(QOpenGLWidget):
-    def __init__(self, source_screen, target_screen,
-                 offset_x, virtual_size, warp_info):
+    def __init__(self, source_screen, target_screen, warp_info):
         super().__init__()
 
         self.setWindowFlags(Qt.FramelessWindowHint)
@@ -25,22 +23,21 @@ class GLDisplayWindow(QOpenGLWidget):
         g = target_screen.geometry()
         self.setGeometry(g.x(), g.y(), g.width(), g.height())
 
-        self.offset_x = offset_x
-        self.virtual_size = virtual_size
-        self.warp_info = warp_info
-
         self.target_width = g.width()
         self.target_height = g.height()
+
+        self.source_screen = source_screen
+        self.warp_info = warp_info
 
         self.sct = mss.mss()
         sg = source_screen.geometry()
 
-        # ★ 短冊単位でキャプチャ
+        # ★ 編集用ディスプレイ全体を常にキャプチャ
         self.monitor = {
             "top": sg.y(),
             "left": sg.x(),
-            "width": self.virtual_size[0],
-            "height": self.virtual_size[1],
+            "width": sg.width(),
+            "height": sg.height(),
         }
 
         self.timer = QTimer()
@@ -79,7 +76,6 @@ class GLDisplayWindow(QOpenGLWidget):
             void main() {
                 vec2 src_uv = texture(warp_tex, v_uv).rg;
 
-                // 範囲外ガード（重要）
                 if (src_uv.x < 0.0 || src_uv.x > 1.0 ||
                     src_uv.y < 0.0 || src_uv.y > 1.0) {
                     frag_color = vec4(0.0, 0.0, 0.0, 1.0);
@@ -95,18 +91,17 @@ class GLDisplayWindow(QOpenGLWidget):
             self.prog, [(self.vbo, "2f 2f", "in_vert", "in_text")]
         )
 
-        # --- 映像テクスチャ（短冊サイズ）
-        self.video_tex = self.ctx.texture(
-            self.virtual_size, 4
-        )
+        # --- 映像テクスチャ（編集用ディスプレイ全体）
+        sg = self.source_screen.geometry()
+        self.video_tex = self.ctx.texture((sg.width(), sg.height()), 4)
         self.video_tex.swizzle = "BGRA"
         self.video_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
 
-        # --- warp map（すでに短冊化済み）
+        # --- warp map（短冊）
         map_x, map_y = self.warp_info
         uv = np.dstack([
-            map_x / float(self.virtual_size[0]),
-            map_y / float(self.virtual_size[1])
+            map_x / float(sg.width()),
+            map_y / float(sg.height())
         ]).astype("f4")
 
         h, w = map_x.shape
@@ -129,7 +124,6 @@ def main():
     parser.add_argument("--source", required=True)
     parser.add_argument("--targets", nargs="+", required=True)
     parser.add_argument("--mode", default="warp_map")
-    parser.add_argument("--blend", action="store_true")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -138,32 +132,40 @@ def main():
     screens = {get_virtual_id(s.name()): s for s in QGuiApplication.screens()}
     source = screens[get_virtual_id(args.source)]
 
-    total_w = sum(screens[get_virtual_id(t)].geometry().width() for t in args.targets)
-    max_h = max(screens[get_virtual_id(t)].geometry().height() for t in args.targets)
+    num_targets = len(args.targets)
+    source_w = source.geometry().width()
+    source_h = source.geometry().height()
 
-    offset = 0
+    slice_w = source_w // num_targets
+
     windows = []
 
-    for t in args.targets:
+    for i, t in enumerate(args.targets):
         scr = screens[get_virtual_id(t)]
         w = scr.geometry().width()
         h = scr.geometry().height()
 
-        map_x, map_y = prepare_warp(
+        full_map_x, full_map_y = prepare_warp(
             t,
             args.mode,
-            src_size=(source.geometry().width(), source.geometry().height()),
+            src_size=(source_w, source_h),
             load_points_func=load_points,
             log_func=log
         )
 
+        x0 = i * slice_w
+        x1 = x0 + slice_w
+
+        map_x = full_map_x[:h, x0:x1]
+        map_y = full_map_y[:h, x0:x1]
+
         win = GLDisplayWindow(
-            source, scr, offset, (total_w, max_h), (map_x, map_y)
+            source,
+            scr,
+            (map_x, map_y)
         )
         win.show()
         windows.append(win)
-
-        offset += w
 
     sys.exit(app.exec_())
 

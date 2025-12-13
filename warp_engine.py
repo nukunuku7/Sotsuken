@@ -6,6 +6,7 @@ import json
 import math
 import numpy as np
 import cv2 # マップ生成（perspectiveモード）およびヘルパー関数で使用
+from PyQt5.QtGui import QGuiApplication
 
 # 環境設定ファイル (主にwarp_mapモードで使用) のインポートを試みる
 try:
@@ -15,6 +16,50 @@ except Exception:
 
 # グローバルなキャッシュ辞書
 warp_cache = {}
+
+def auto_assign_simsets(log_func=None):
+    """
+    ディスプレイの左→右順に ScreenSimulatorSet_x を自動割り当て。
+    DISPLAY_TO_SIMSET を更新する。
+    """
+    global DISPLAY_TO_SIMSET
+
+    if environment_config is None:
+        _log("[WARN] environment_config not available.", log_func)
+        return
+
+    screens = []
+    try:
+        screens = QGuiApplication.screens()
+    except Exception:
+        pass
+
+    if not screens:
+        _log("[WARN] No screens detected.", log_func)
+        return
+
+    # 左→右順
+    ordered_screens = sorted(screens, key=lambda s: s.geometry().x())
+    display_names = [s.name() for s in ordered_screens]
+
+    simsets = environment_config.get("screen_simulation_sets", [])
+    simset_count = len(simsets)
+    if simset_count == 0:
+        _log("[WARN] No screen_simulation_sets found.", log_func)
+        return
+
+    # 割り当て
+    DISPLAY_TO_SIMSET = {}
+    for idx, name in enumerate(display_names):
+        # ディスプレイの左から順にセットを割り当て
+        sim_idx = idx % simset_count
+        DISPLAY_TO_SIMSET[name] = sim_idx
+        _log(f"[ASSIGN] {name} -> ScreenSimulatorSet_{sim_idx+1}", log_func)
+
+    _log(f"[INFO] Assigned {len(DISPLAY_TO_SIMSET)} screens to {simset_count} sets.", log_func)
+
+# 起動時に自動割り当て
+auto_assign_simsets()
 
 def _log(msg, log_func=None):
     """ログを出力するための共通関数。外部のロガーが利用可能ならそちらを使用。"""

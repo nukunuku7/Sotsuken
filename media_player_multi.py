@@ -13,20 +13,6 @@ from PyQt5.QtCore import QTimer, Qt
 from editor.grid_utils import load_points, log, get_virtual_id
 from warp_engine import warp_image, prepare_warp, convert_maps_to_uv_texture_data
 
-# === GPU 自動検出 ==================================================
-try:
-    # cv2.cuda が使えるか確認
-    import cv2.cuda as cuda
-    GPU_AVAILABLE = cuda.getCudaEnabledDeviceCount() > 0
-    if GPU_AVAILABLE:
-        log("◎ CUDA GPU が検出されました。GPU処理を使用します。")
-    else:
-        log("△ GPU は利用できません。CPU処理になります。")
-except Exception:
-    GPU_AVAILABLE = False
-    log("△ CUDA が利用できないため CPUモードで動作します。")
-# ===================================================================
-
 
 class GLDisplayWindow(QOpenGLWidget):
     def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size,
@@ -64,6 +50,17 @@ class GLDisplayWindow(QOpenGLWidget):
     def initializeGL(self):
         """OpenGLの初期化：一度だけ呼ばれる"""
         self.ctx = moderngl.create_context()
+
+        # === GPU 情報を取得して表示 ==========================
+        try:
+            vendor = self.ctx.info["GL_VENDOR"]
+            renderer = self.ctx.info["GL_RENDERER"]
+            version = self.ctx.info["GL_VERSION"]
+            log(f"🟢 GPU 検出: {renderer} ({vendor})")
+            log(f"    OpenGL Version: {version}")
+        except Exception as e:
+            log(f"⚠️ GPU 情報の取得に失敗しました: {e}")
+        # =====================================================
         
         # 1. 頂点データ（画面全体を覆う四角形）
         # x, y, u, v

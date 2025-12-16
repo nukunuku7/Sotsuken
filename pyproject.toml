@@ -5,9 +5,6 @@ version = "0.1.0"
 requires-python = ">=3.10,<3.12"
 
 dependencies = [
-    # --- GPU/数値計算関連 ---
-    # CuPy: GPU検出のために維持
-    "cupy-cuda12x==12.3.0", 
     "numpy",
 
     # --- 画像・スクリーンキャプチャ関連 ---

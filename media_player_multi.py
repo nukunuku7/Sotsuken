@@ -1,6 +1,5 @@
 import sys
 import argparse
-import cv2
 import numpy as np
 import mss
 import signal
@@ -11,13 +10,15 @@ from PyQt5.QtGui import QImage, QPixmap, QGuiApplication
 from PyQt5.QtCore import QTimer, Qt
 
 from editor.grid_utils import load_points, log, get_virtual_id
-from warp_engine import warp_image, prepare_warp, convert_maps_to_uv_texture_data
+from warp_engine import prepare_warp, convert_maps_to_uv_texture_data
 
 
 class GLDisplayWindow(QOpenGLWidget):
-    def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size,
-                 warp_info_all=None, fade_enabled=False):
+    def __init__(self, source_screen, target_screen, mode,
+                 proj_index, proj_count,
+                 warp_info_all=None):
         super().__init__()
+
         # ウィンドウ設定
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -28,7 +29,8 @@ class GLDisplayWindow(QOpenGLWidget):
 
         self.source_screen = source_screen
         self.warp_info_all = warp_info_all
-        self.offset_x = offset_x
+        self.proj_count = proj_count
+        self.proj_index = proj_index
         
         # MSSの初期化 (キャプチャ範囲設定)
         self.sct = mss.mss()
@@ -37,10 +39,11 @@ class GLDisplayWindow(QOpenGLWidget):
         # MSS用のキャプチャ領域辞書
         self.monitor = {
             "top": sg.y(),
-            "left": sg.x() + offset_x, # 担当エリアのオフセットを加算
-            "width": g.width(),        # 出力先の解像度と合わせる(前提)
-            "height": g.height()
+            "left": sg.x(),
+            "width": sg.width(),
+            "height": sg.height()
         }
+
 
         # フレームレート制御用タイマー (60FPS目標)
         self.timer = QTimer()
@@ -61,7 +64,7 @@ class GLDisplayWindow(QOpenGLWidget):
         except Exception as e:
             log(f"⚠️ GPU 情報の取得に失敗しました: {e}")
         # =====================================================
-        
+
         # 1. 頂点データ（画面全体を覆う四角形）
         # x, y, u, v
         vertices = np.array([
@@ -85,21 +88,39 @@ class GLDisplayWindow(QOpenGLWidget):
                 """,
                 fragment_shader="""
                     #version 330
-                    uniform sampler2D original_tex;
-                    uniform sampler2D warp_map_tex;
-                    in vec2 v_text;
+
+                    uniform sampler2D original_tex;   // source 映像（全体）
+                    uniform sampler2D warp_uv_tex;    // warp map（各 projector 用）
+                    uniform int proj_index;
+                    uniform int proj_count;
+
+                    in vec2 v_text;   // 0–1（この projector の画面）
                     out vec4 f_color;
+
                     void main() {
-                        // UVマップから「本来参照すべき座標」を取得
-                        vec2 source_uv = texture(warp_map_tex, v_text).rg;
-                        
-                        // 座標が 0.0~1.0 の範囲外なら黒にする（クリッピング）
-                        if (source_uv.x < 0.0 || source_uv.x > 1.0 || source_uv.y < 0.0 || source_uv.y > 1.0) {
-                            f_color = vec4(0.0, 0.0, 0.0, 1.0);
-                        } else {
-                            // 元画像から色を取得
-                            f_color = texture(original_tex, source_uv);
+
+                        // 1. この projector が担当する source の横範囲
+                        float seg_w = 1.0 / float(proj_count);
+                        float u0 = seg_w * float(proj_index);
+                        float u1 = seg_w * float(proj_index + 1);
+
+                        // 2. warp map は「ローカル座標」で読む（超重要）
+                        vec2 warp_uv = texture(warp_uv_tex, v_text).rg;
+
+                        // 無効領域は黒
+                        if (warp_uv.x < 0.0 || warp_uv.x > 1.0 ||
+                            warp_uv.y < 0.0 || warp_uv.y > 1.0) {
+                            f_color = vec4(0.0);
+                            return;
                         }
+
+                        // 3. warp 後の UV を source 全体にマッピング
+                        vec2 final_uv = vec2(
+                            mix(u0, u1, warp_uv.x),
+                            warp_uv.y
+                        );
+
+                        f_color = texture(original_tex, final_uv);
                     }
                 """
             )
@@ -117,11 +138,11 @@ class GLDisplayWindow(QOpenGLWidget):
         ])
 
         # 2. テクスチャ作成
-        w = self.monitor["width"]
-        h = self.monitor["height"]
+        pw = self.width()
+        ph = self.height()
         
         # 映像用テクスチャ (Binding 0)
-        self.texture_video = self.ctx.texture((w, h), 4) # BGRA=4ch
+        self.texture_video = self.ctx.texture((pw, ph), 4) # BGRA=4ch
         self.texture_video.swizzle = 'BGRA' # BGRA -> RGBへスウィズル(並び替え)
         
         # 歪み補正マップ用テクスチャ (Binding 1)
@@ -136,16 +157,28 @@ class GLDisplayWindow(QOpenGLWidget):
                  sys.exit(1)
             
             # ★ここで手順2で作った変換関数を使う
-            uv_data = convert_maps_to_uv_texture_data(map_x, map_y, w, h)
+            uv_data = convert_maps_to_uv_texture_data(
+                map_x,
+                map_y,
+                self.monitor["width"],   # source width
+                self.monitor["height"]   # source height
+            )
 
-            self.texture_warp = self.ctx.texture((w, h), 2, data=uv_data, dtype='f4')
+            self.texture_warp = self.ctx.texture(
+                (pw, ph),
+                2,
+                data=uv_data,
+                dtype='f4'
+            )
         else:
             # マップがない場合は恒等写像（歪みなし）を作る等の処理
-            self.texture_warp = self.ctx.texture((w, h), 2, dtype='f4') # 空
+            self.texture_warp = self.ctx.texture((pw, ph), 2, dtype='f4') # 空
 
         # シェーダーにテクスチャ番号を教える
         self.prog['original_tex'].value = 0
-        self.prog['warp_map_tex'].value = 1
+        self.prog['warp_uv_tex'].value = 1
+        self.prog['proj_index'].value = self.proj_index
+        self.prog['proj_count'].value = self.proj_count
 
     def paintGL(self):
         """毎フレーム呼ばれる描画処理"""
@@ -192,7 +225,7 @@ def main():
         sys.exit(1)
 
     args.source = src_vid
-    args.targets = [t for t in tgt_vids if t]
+    args.targets = [get_virtual_id(t) for t in args.targets if get_virtual_id(t)]
 
 
     # --- QScreen を名前別に取得（QScreen.name() と仮想ID の両方をキーにする） ---
@@ -219,31 +252,30 @@ def main():
     windows = []
     offset_x = 0
 
-    for name in args.targets:
+    for proj_index, name in enumerate(args.targets):
         if name not in screens_by_name:
             print(f"⚠️ ターゲットディスプレイが見つかりません: {name}")
             continue
 
         target_screen = screens_by_name[name]
-        fade_enabled = args.blend and len(args.targets) > 1
 
-        warp_info = prepare_warp(name, args.mode,
-                                 (target_screen.geometry().width(), target_screen.geometry().height()),
-                                 load_points_func=load_points, log_func=log)
+        warp_info = prepare_warp(
+            name,
+            args.mode,
+            (target_screen.geometry().width(), target_screen.geometry().height()),
+            load_points_func=load_points,
+            log_func=log
+        )
 
-        if warp_info is None:
-            print(f"⚠️ {name} の warp 情報がありません。スキップします。")
-            continue
-        
-        # warp_info は (map_x, map_y) タプルになっている
-
-        print(f"🎥 {args.source} → {name} 出力 (fade={fade_enabled})")
+        print(f"🎥 {args.source} → {name} 出力")
 
         window = GLDisplayWindow(
-            source_screen, target_screen, args.mode,
-            offset_x, virtual_size,
-            warp_info_all=warp_info,  # warp_info_all には (map_x, map_y) タプルが入る
-            fade_enabled=fade_enabled
+            source_screen,
+            target_screen,
+            args.mode,
+            proj_index=proj_index,              # ★ int
+            proj_count=len(args.targets),       # ★ int
+            warp_info_all=warp_info
         )
         window.show()
         windows.append(window)

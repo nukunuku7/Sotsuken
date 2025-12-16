@@ -266,9 +266,27 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
             _log("[WARN] perspective points missing", log_func)
             return None
         matrix = generate_perspective_matrix(src_size, pts[:4])
-        warp_cache[cache_key] = {"mode": "perspective", "matrix": matrix}
+
+        # ★★★ 修正：matrix から map_x と map_y を生成する ★★★
+        w_out, h_out = int(src_size[0]), int(src_size[1])
+        
+        # 恒等写像 (Identity Map) を作成
+        map_x, map_y = np.indices((h_out, w_out), dtype=np.float32)
+        map_x = map_x.T
+        map_y = map_y.T
+
+        # matrix を使って map_x と map_y を変換（OpenCVの機能で remap のマップを作る）
+        map_x, map_y = cv2.convertMaps(
+            cv2.warpPerspective(map_x, matrix, src_size, flags=cv2.INTER_LINEAR),
+            cv2.warpPerspective(map_y, matrix, src_size, flags=cv2.INTER_LINEAR),
+            cv2.CV_32FC1
+        )
+        
+        # warp_cache[cache_key] = {"mode": "perspective", "matrix": matrix} # 辞書のキャッシュは不要
+        warp_cache[cache_key] = (map_x, map_y) # キャッシュを (map_x, map_y) のタプルにする
+        
         _log(f"[OK] perspective matrix prepared for {display_name}", log_func)
-        return warp_cache[cache_key]
+        return map_x, map_y # ★ map_x, map_y のタプルを直接返す ★
 
     # warp_map mode: heavy CPU precompute (unchanged)
     if environment_config is None:
@@ -401,7 +419,7 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         "map_y": map_y
     }
     _log(f"[OK] warp_map prepared for {display_name} ({w_out}x{h_out})", log_func)
-    return warp_cache[cache_key]
+    return map_x, map_y
 
 # --- warp_image: GPU を優先する実装 + 転送最適化 --------------
 def warp_image(image, warp_info, log_func=None):
@@ -553,3 +571,27 @@ def warp_image(image, warp_info, log_func=None):
         else:
             print(f"[ERROR] warp_image failed: {e}")
         return image
+
+# warp_engine.py の末尾に追加
+
+def convert_maps_to_uv_texture_data(map_x, map_y, width, height):
+    """
+    OpenCVのmap_x, map_y (pixel単位) を
+    OpenGL/ModernGL用のUVマップ (0.0~1.0正規化, float32, HxWx2) に変換する
+    """
+    # 正規化 (0.0 ~ 1.0)
+    # OpenCVの座標系に合わせて、範囲外の処理などをここで行うことも可能
+    u = map_x.astype(np.float32) / width
+    v = map_y.astype(np.float32) / height
+    
+    # (Height, Width, 2) の形状にスタックする
+    # channel 0 = u, channel 1 = v
+    uv_map = np.dstack((u, v))
+    
+    # OpenGLのテクスチャ座標系(左下原点)と画像の座標系(左上原点)の違いを吸収するため
+    # 必要に応じてYを反転するが、今回は画像自体をそのまま扱うため、
+    # シェーダー側でY反転するか、ここで調整する。
+    # 通常MSS取得画像とOpenCVマップの整合性を保つにはそのままで良い場合が多いが、
+    # 上下逆になる場合はここを v = 1.0 - v とする。
+    
+    return uv_map.astype('f4').tobytes()

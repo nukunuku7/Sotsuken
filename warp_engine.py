@@ -233,6 +233,7 @@ except Exception:
     DISPLAY_TO_SIMSET = {}
 
 
+<<<<<<< HEAD
 # --- prepare_warp: 既存コード (省略せずそのまま使用) ---
 def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
     # sanitize display name for file paths
@@ -247,29 +248,79 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
     display_name = safe_name
     
     _log(f"[prepare_warp] Display={display_name} Mode={mode} Size={src_size}", log_func)
+=======
+# --- prepare_warp: 歪み補正マップ生成のコア機能 ---
+def prepare_warp(display_name, mode, src_size, src_offset_x=0, load_points_func=None, log_func=None):
+    """
+    指定されたディスプレイとモードに基づき、歪み補正用のマップ (map_x, map_y) を生成またはロードする。
+
+    ※ 注意:
+    - この関数は「1画面（1プロジェクター）= 1ローカル座標系」を前提とする
+    - n分割（slice）やオフセット処理は GL / 描画側の責務
+    - src_offset_x は設計変更により使用しない（互換性のため引数のみ残す）
+    
+    戻り値: (map_x, map_y) のタプル (numpy.ndarray, float32)
+    """
+
+    # ------------------------------------------------------------
+    # 1. キャッシュチェック
+    # ------------------------------------------------------------
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
     cache_key = (display_name, mode, src_size)
     if cache_key in warp_cache:
         _log("[cache] hit", log_func)
         return warp_cache[cache_key]
 
+<<<<<<< HEAD
     if mode == "perspective":
         if load_points_func:
             pts = load_points_func(display_name, mode)
         else:
             cfg_path = os.path.join("config", "projector_profiles", f"__._{display_name}_{mode}_points.json")
+=======
+    w_out, h_out = int(src_size[0]), int(src_size[1])
+
+    # ============================================================
+    # Mode 1: perspective（簡易射影変換）
+    # ============================================================
+    if mode == "perspective":
+
+        # --------------------------------------------------------
+        # 1-1. 設定点（4点）のロード
+        # --------------------------------------------------------
+        if load_points_func:
+            pts = load_points_func(display_name, mode)
+        else:
+            cfg_path = os.path.join(
+                "config", "projector_profiles",
+                f"__.__{display_name}_{mode}_points.json"
+            )
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
             if not os.path.exists(cfg_path):
                 _log(f"[WARN] perspective grid file not found: {cfg_path}", log_func)
                 return None
             with open(cfg_path, "r", encoding="utf-8") as f:
                 pts = json.load(f)
+<<<<<<< HEAD
+=======
+
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
         if pts is None or len(pts) < 4:
             _log("[WARN] perspective points missing", log_func)
             return None
+<<<<<<< HEAD
+=======
+
+        # --------------------------------------------------------
+        # 1-2. 射影変換行列の生成
+        # --------------------------------------------------------
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
         matrix = generate_perspective_matrix(src_size, pts[:4])
         warp_cache[cache_key] = {"mode": "perspective", "matrix": matrix}
         _log(f"[OK] perspective matrix prepared for {display_name}", log_func)
         return warp_cache[cache_key]
 
+<<<<<<< HEAD
     # warp_map mode: heavy CPU precompute (unchanged)
     if environment_config is None:
         _log("[ERROR] environment_config not available. Place config/environment_config.py", log_func)
@@ -285,6 +336,54 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
     except Exception as e:
         _log(f"[ERROR] cannot access simulation set {sim_idx}: {e}", log_func)
         return None
+=======
+        # --------------------------------------------------------
+        # 1-3. OpenCV remap 用マップ生成
+        # --------------------------------------------------------
+        # 恒等写像（出力側ピクセル座標）
+        map_y_identity, map_x_identity = np.indices(
+            (h_out, w_out), dtype=np.float32
+        )
+
+        # 各出力ピクセルが「元画像のどこを見るか」を計算
+        map_x = cv2.warpPerspective(
+            map_x_identity, matrix, src_size, flags=cv2.INTER_LINEAR
+        )
+        map_y = cv2.warpPerspective(
+            map_y_identity, matrix, src_size, flags=cv2.INTER_LINEAR
+        )
+
+        # --------------------------------------------------------
+        # ★ 旧設計（n分割前提）の名残：使用しない
+        # --------------------------------------------------------
+        # if src_offset_x != 0:
+        #     map_x = map_x - float(src_offset_x)
+
+        # 範囲外を安全に潰す
+        map_x[map_x < 0] = 0.0
+        map_x[map_x > (w_out - 1)] = 0.0
+        map_y[map_y < 0] = 0.0
+        map_y[map_y > (h_out - 1)] = 0.0
+
+        map_x = map_x.astype(np.float32)
+        map_y = map_y.astype(np.float32)
+
+        # if src_offset_x != 0:
+        #     map_x = map_x + float(src_offset_x)
+
+        warp_cache[cache_key] = (map_x, map_y)
+        _log(f"[OK] perspective map prepared for {display_name}", log_func)
+        return map_x, map_y
+
+    # ============================================================
+    # Mode 2: warp_map（3Dシミュレーション）
+    # ============================================================
+    elif mode == "warp_map":
+
+        if environment_config is None:
+            _log("[ERROR] environment_config not available.", log_func)
+            return None
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
 
     proj = sim_set.get("projector")
     mirror = sim_set.get("mirror")
@@ -299,8 +398,71 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
     fov_v = float(proj.get("fov_v", fov_h))
     proj_resolution = tuple(proj.get("resolution", [int(src_size[0]), int(src_size[1])]))
 
+<<<<<<< HEAD
     keystone_v = float(proj.get("keystone_v", 0.0))
     if abs(keystone_v) > 1e-6:
+=======
+        proj = sim_set.get("projector")
+        mirror = sim_set.get("mirror")
+        screen = sim_set.get("screen")
+        if not proj or not mirror or not screen:
+            _log("[WARN] incomplete sim set (need projector/mirror/screen)", log_func)
+            return None
+
+        proj_origin = np.array(proj["origin"], dtype=np.float64)
+        proj_dir = _normalize(np.array(proj["direction"], dtype=np.float64))
+        fov_h = float(proj.get("fov_h", 53.13))
+        fov_v = float(proj.get("fov_v", fov_h))
+
+        # ★ 1画面 = 1解像度（sliceはGL側で処理）
+        proj_resolution = (w_out, h_out)
+
+        # if src_offset_x != 0:
+        #     map_x = map_x + float(src_offset_x)
+
+        # --------------------------------------------------------
+        # 以下、元ロジックそのまま（数式・構造は変更なし）
+        # --------------------------------------------------------
+        keystone_v = float(proj.get("keystone_v", 0.0))
+        if abs(keystone_v) > 1e-6:
+            default_up = np.array([0.0, 0.0, 1.0])
+            if abs(np.dot(default_up, proj_dir)) > 0.99:
+                default_up = np.array([0.0, 1.0, 0.0])
+            right = _normalize(np.cross(proj_dir, default_up))
+            up = _normalize(np.cross(right, proj_dir))
+            theta = math.radians(keystone_v)
+            proj_dir = _normalize(
+                proj_dir * math.cos(theta) +
+                np.cross(right, proj_dir) * math.sin(theta) +
+                right * np.dot(right, proj_dir) * (1 - math.cos(theta))
+            )
+            _log(f"[keystone] vertical keystone applied: {keystone_v} deg", log_func)
+
+        mirror_pts = np.array(mirror.get("vertices", []), dtype=np.float64)
+        screen_pts = np.array(screen.get("vertices", []), dtype=np.float64)
+        if mirror_pts.size == 0 or screen_pts.size == 0:
+            _log("[WARN] mirror or screen point cloud empty", log_func)
+            return None
+
+        screen_centroid, screen_u, screen_v, screen_normal = _fit_plane(screen_pts)
+        uv_coords = np.stack([
+            np.dot(screen_pts - screen_centroid, screen_u),
+            np.dot(screen_pts - screen_centroid, screen_v)
+        ], axis=1)
+        u_min, v_min = uv_coords.min(axis=0)
+        u_max, v_max = uv_coords.max(axis=0)
+
+        try:
+            mirror_normals = _estimate_normals_for_pointcloud(
+                mirror_pts, sample_stride=1, k=16
+            )
+        except Exception:
+            mirror_normals = np.tile(np.array([0, 0, 1.0]), (len(mirror_pts), 1))
+
+        fov_h_rad = math.radians(fov_h)
+        fov_v_rad = math.radians(fov_v)
+
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
         default_up = np.array([0.0, 0.0, 1.0])
         if abs(np.dot(default_up, proj_dir)) > 0.99:
             default_up = np.array([0.0, 1.0, 0.0])
@@ -316,6 +478,7 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         )
         _log(f"[keystone] vertical keystone applied: {keystone_v} deg", log_func)
 
+<<<<<<< HEAD
     mirror_pts = np.array(mirror.get("vertices", []), dtype=np.float64)
     screen_pts = np.array(screen.get("vertices", []), dtype=np.float64)
     if mirror_pts.size == 0 or screen_pts.size == 0:
@@ -373,6 +536,58 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
                 map_x[yy, xx] = 0.0
                 map_y[yy, xx] = 0.0
                 continue
+=======
+        map_x = np.zeros((h_out, w_out), dtype=np.float32)
+        map_y = np.zeros((h_out, w_out), dtype=np.float32)
+
+        for yy in range(h_out):
+            v = ((yy + 0.5) / h_out - 0.5) * fov_v_rad
+            for xx in range(w_out):
+                u = ((xx + 0.5) / w_out - 0.5) * fov_h_rad
+                dir_cam = _normalize(
+                    proj_dir + right * math.tan(u) + up * math.tan(v)
+                )
+
+                mirror_hit_pt, _, _ = _nearest_along_ray(
+                    proj_origin, dir_cam, mirror_pts, 0.01, 10.0
+                )
+                if mirror_hit_pt is None:
+                    continue
+
+                diffs = mirror_pts - mirror_hit_pt[None, :]
+                idx = int(np.argmin(np.linalg.norm(diffs, axis=1)))
+                n = mirror_normals[idx]
+                if np.linalg.norm(n) == 0:
+                    n = screen_normal
+
+                refl = _reflect(dir_cam, n)
+
+                screen_hit_pt, _, _ = _nearest_along_ray(
+                    mirror_hit_pt + refl * 1e-6, refl, screen_pts, 0.01, 10.0
+                )
+                if screen_hit_pt is None:
+                    continue
+
+                rel = screen_hit_pt - screen_centroid
+                ucoord = float(np.dot(rel, screen_u))
+                vcoord = float(np.dot(rel, screen_v))
+
+                if (u_max - u_min) == 0 or (v_max - v_min) == 0:
+                    continue
+
+                fx = (ucoord - u_min) / (u_max - u_min)
+                fy = (vcoord - v_min) / (v_max - v_min)
+
+                if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
+                    map_x[yy, xx] = fx * (proj_resolution[0] - 1)
+                    map_y[yy, xx] = (1.0 - fy) * (proj_resolution[1] - 1)
+
+        warp_cache[cache_key] = (map_x, map_y)
+        _log(f"[OK] warp_map prepared for {display_name} ({w_out}x{h_out})", log_func)
+        return map_x, map_y
+
+    return None
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
 
             rel = screen_hit_pt - screen_centroid
             ucoord = float(np.dot(rel, screen_u))

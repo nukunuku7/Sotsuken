@@ -25,13 +25,23 @@ except Exception:
 # ===================================================================
 
 
+<<<<<<< HEAD
 class DisplayWindow(QWidget):
     def __init__(self, source_screen, target_screen, mode, offset_x, virtual_size,
                  warp_info_all=None, fade_enabled=False):
+=======
+# ============================================================
+# OpenGL Window
+# ============================================================
+class GLDisplayWindow(QOpenGLWidget):
+    def __init__(self, source_screen, target_screen,
+                 slice_offset_x, slice_size, warp_info):
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
         super().__init__()
         self.setWindowFlag(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
+<<<<<<< HEAD
         self.source_screen = source_screen
         self.target_screen = target_screen
         self.mode = mode
@@ -54,6 +64,28 @@ class DisplayWindow(QWidget):
             "top": geom_src.y(),
             "width": geom_src.width(),
             "height": geom_src.height()
+=======
+        # --- 表示先（プロジェクター）全画面
+        g = target_screen.geometry()
+        self.setGeometry(g.x(), g.y(), g.width(), g.height())
+
+        self.source_screen = source_screen
+        self.slice_offset_x = slice_offset_x   # ★ 将来用（現在は未使用）
+        self.slice_size = slice_size
+        self.warp_info = warp_info
+
+        self.target_width = g.width()
+        self.target_height = g.height()
+
+        # --- MSS（編集画面全体をキャプチャ）
+        self.sct = mss.mss()
+        sg = source_screen.geometry()
+        self.monitor = {
+            "top": sg.y(),
+            "left": sg.x(),
+            "width": sg.width(),
+            "height": sg.height(),
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
         }
 
         # warp 情報（ターゲット名は QScreen.name() か、media 側で仮想IDを解決して渡される）
@@ -84,7 +116,15 @@ class DisplayWindow(QWidget):
         self.timer.start(16)  # 16ms = 60fps
         # ========================
 
+<<<<<<< HEAD
         self.showFullScreen()
+=======
+    # ------------------------------------------------------------
+    # OpenGL 初期化
+    # ------------------------------------------------------------
+    def initializeGL(self):
+        self.ctx = moderngl.create_context()
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
 
     def update_frame(self):
         raw = np.array(self.sct.grab(self.mon))
@@ -122,6 +162,7 @@ class DisplayWindow(QWidget):
             resized = cv2.resize(sub_cpu, (part_w, part_h), interpolation=cv2.INTER_LINEAR)
         # ===================================================
 
+<<<<<<< HEAD
         # === 歪み補正（warp_map は CPUのまま） ============
         warped = warp_image(resized, warp_info=self.warp_info)
         if warped is None:
@@ -132,6 +173,22 @@ class DisplayWindow(QWidget):
             h, w = warped.shape[:2]
             fade = np.ones((h, w), dtype=np.float32)
             blend_w = int(w * 0.10)
+=======
+        # --- 編集画面全体テクスチャ
+        sg = self.source_screen.geometry()
+        self.video_tex = self.ctx.texture(
+            (sg.width(), sg.height()), 4
+        )
+        self.video_tex.swizzle = "BGRA"
+        self.video_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+
+        # --- warp map（常に slice サイズ基準）
+        map_x, map_y = self.warp_info
+        uv = np.dstack([
+            map_x / float(self.slice_size[0]),
+            map_y / float(self.slice_size[1])
+        ]).astype("f4")
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
 
             for x in range(blend_w):
                 alpha = x / float(blend_w)
@@ -141,19 +198,39 @@ class DisplayWindow(QWidget):
             warped = (warped.astype(np.float32) * fade[..., None]).astype(np.uint8)
         # =================================================
 
+<<<<<<< HEAD
         # === 出力 ========================================
         h, w, ch = warped.shape
         bytes_per_line = ch * w
         qt_image = QImage(warped.data, w, h, bytes_per_line, QImage.Format_RGB888)
         self.label.setPixmap(QPixmap.fromImage(qt_image))
+=======
+    # ------------------------------------------------------------
+    # 描画
+    # ------------------------------------------------------------
+    def paintGL(self):
+        img = self.sct.grab(self.monitor)
+        self.video_tex.write(img.raw)
+        self.video_tex.use(0)
+        self.warp_tex.use(1)
+        self.vao.render(moderngl.TRIANGLE_STRIP)
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
 
 
+# ============================================================
+# Main
+# ============================================================
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
     parser.add_argument("--targets", nargs="+", required=True)
+<<<<<<< HEAD
     parser.add_argument("--mode", choices=["perspective", "warp_map"], default="perspective")
     parser.add_argument("--blend", action="store_true", help="Enable alpha blending")
+=======
+    parser.add_argument("--mode", default="warp_map")
+    parser.add_argument("--blend", action="store_true")  # 将来拡張用
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -162,6 +239,7 @@ def main():
     src_vid = get_virtual_id(args.source)
     tgt_vids = [get_virtual_id(t) for t in args.targets]
 
+<<<<<<< HEAD
     if not src_vid:
         print(f"❌ ソース {args.source} の内部ID変換に失敗")
         sys.exit(1)
@@ -190,10 +268,18 @@ def main():
     # max_height は利用可能なスクリーン全体の最大高さ（または targets の最大高さでも良い）
     max_height = max((s.geometry().height() for s in screens_by_name.values()), default= source_screen.geometry().height())
     virtual_size = (total_width, max_height)
+=======
+    src_geo = source.geometry()
+    num_targets = len(args.targets)
+
+    slice_w = src_geo.width() // num_targets
+    slice_h = src_geo.height()
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
 
     windows = []
     offset_x = 0
 
+<<<<<<< HEAD
     for name in args.targets:
         if name not in screens_by_name:
             print(f"⚠️ ターゲットディスプレイが見つかりません: {name}")
@@ -217,13 +303,39 @@ def main():
             offset_x, virtual_size,
             warp_info_all=warp_info,
             fade_enabled=fade_enabled
+=======
+    for i, t in enumerate(args.targets):
+        scr = screens[get_virtual_id(t)]
+
+        offset_x = i * slice_w  # ★ 将来用（warp では使用しない）
+
+        map_x, map_y = prepare_warp(
+            t,
+            args.mode,
+            src_size=(slice_w, slice_h),
+            # src_offset_x=offset_x,  # ← 設計変更により不使用
+            load_points_func=load_points,
+            log_func=log
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
         )
         windows.append(window)
         offset_x += target_screen.geometry().width()
 
+<<<<<<< HEAD
     if not windows:
         print("❌ 出力ディスプレイがありません。終了します。")
         sys.exit(1)
+=======
+        win = GLDisplayWindow(
+            source,
+            scr,
+            offset_x,
+            (slice_w, slice_h),
+            (map_x, map_y)
+        )
+        win.show()
+        windows.append(win)
+>>>>>>> 941fe4942b97dcdad64f5aa145809e1d66a430b8
 
     sys.exit(app.exec_())
 

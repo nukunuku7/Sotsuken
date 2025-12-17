@@ -4,13 +4,12 @@ import os
 import json
 import subprocess
 from pathlib import Path
-
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
     QLabel, QMessageBox, QComboBox, QListWidget, QListWidgetItem
 )
-from PyQt5.QtGui import QGuiApplication
-from PyQt5.QtCore import Qt
 
 from editor.grid_utils import (
     auto_generate_from_environment, get_virtual_id

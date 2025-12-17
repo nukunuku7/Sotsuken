@@ -1,10 +1,10 @@
 # editor/grid_editor_perspective.py
-import argparse
-import tkinter as tk
-import sys
 import os
-import threading
+import sys
 import time
+import argparse
+import threading
+import tkinter as tk
 from pathlib import Path
 
 def ensure_module_path():

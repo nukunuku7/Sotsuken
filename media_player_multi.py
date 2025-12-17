@@ -1,13 +1,14 @@
+# media_player_multi.py
+
 import sys
-import argparse
-import numpy as np
 import mss
 import signal
+import argparse
 import moderngl
-from PyQt5.QtWidgets import QOpenGLWidget
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget
-from PyQt5.QtGui import QImage, QPixmap, QGuiApplication
+import numpy as np
 from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QGuiApplication
+from PyQt5.QtWidgets import QOpenGLWidget, QApplication
 
 from editor.grid_utils import load_points, log, get_virtual_id
 from warp_engine import prepare_warp, convert_maps_to_uv_texture_data

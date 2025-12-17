@@ -1,9 +1,8 @@
 # editor/grid_utils.py
 import os
-import json
 import re
 import time
-import errno
+import json
 from datetime import datetime
 from PyQt5.QtGui import QGuiApplication
 

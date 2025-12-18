@@ -92,18 +92,11 @@ class GLDisplayWindow(QOpenGLWidget):
 
                     uniform sampler2D original_tex;   // source 映像（全体）
                     uniform sampler2D warp_uv_tex;    // warp map（各 projector 用）
-                    uniform int proj_index;
-                    uniform int proj_count;
 
                     in vec2 v_text;   // 0–1（この projector の画面）
                     out vec4 f_color;
 
                     void main() {
-
-                        // 1. この projector が担当する source の横範囲
-                        float seg_w = 1.0 / float(proj_count);
-                        float u0 = seg_w * float(proj_index);
-                        float u1 = seg_w * float(proj_index + 1);
 
                         // 2. warp map は「ローカル座標」で読む（超重要）
                         vec2 warp_uv = texture(warp_uv_tex, v_text).rg;
@@ -114,12 +107,6 @@ class GLDisplayWindow(QOpenGLWidget):
                             f_color = vec4(0.0);
                             return;
                         }
-
-                        // 3. warp 後の UV を source 全体にマッピング
-                        vec2 final_uv = vec2(
-                            mix(u0, u1, warp_uv.x),
-                            warp_uv.y
-                        );
 
                         f_color = texture(original_tex, final_uv);
                     }
@@ -178,8 +165,6 @@ class GLDisplayWindow(QOpenGLWidget):
         # シェーダーにテクスチャ番号を教える
         self.prog['original_tex'].value = 0
         self.prog['warp_uv_tex'].value = 1
-        self.prog['proj_index'].value = self.proj_index
-        self.prog['proj_count'].value = self.proj_count
 
     def paintGL(self):
         """毎フレーム呼ばれる描画処理"""

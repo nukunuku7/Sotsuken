@@ -128,15 +128,17 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         matrix = generate_perspective_matrix(src_size, pts[:4])
 
         w, h = src_size
-        map_x, map_y = np.indices((h, w), dtype=np.float32)
-        map_x = map_x.T
-        map_y = map_y.T
 
-        map_x, map_y = cv2.convertMaps(
-            cv2.warpPerspective(map_x, matrix, src_size),
-            cv2.warpPerspective(map_y, matrix, src_size),
-            cv2.CV_32FC1
-        )
+        # ★ 正しいグリッド生成（X/Y を明示）
+        xs = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+        ys = np.tile(np.arange(h, dtype=np.float32)[:, None], (1, w))
+
+        # ★ warpPerspective は (w, h)
+        map_x = cv2.warpPerspective(xs, matrix, (w, h))
+        map_y = cv2.warpPerspective(ys, matrix, (w, h))
+
+        # ★ convertMaps で OpenCV 正規形式へ
+        map_x, map_y = cv2.convertMaps(map_x, map_y, cv2.CV_32FC1)
 
         warp_cache[cache_key] = (map_x, map_y)
         return map_x, map_y

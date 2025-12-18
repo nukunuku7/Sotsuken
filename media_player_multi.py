@@ -16,8 +16,8 @@ from warp_engine import prepare_warp, convert_maps_to_uv_texture_data
 
 class GLDisplayWindow(QOpenGLWidget):
     def __init__(self, source_screen, target_screen, mode,
-                 proj_index, proj_count,
-                 warp_info_all=None):
+                 warp_info_all=None,
+                 source_geometry=None):
         super().__init__()
 
         # ウィンドウ設定
@@ -26,25 +26,24 @@ class GLDisplayWindow(QOpenGLWidget):
         
         # スクリーン配置
         g = target_screen.geometry()
-        self.setGeometry(g.x(), g.y(), g.width(), g.height())
+        self.setFixedSize(g.width(), g.height())
+        self.move(g.x(), g.y())
 
         self.source_screen = source_screen
         self.warp_info_all = warp_info_all
-        self.proj_count = proj_count
-        self.proj_index = proj_index
         
         # MSSの初期化 (キャプチャ範囲設定)
         self.sct = mss.mss()
         # source_screen の座標を取得
-        sg = source_screen.geometry()
+        sg = source_geometry
+
         # MSS用のキャプチャ領域辞書
         self.monitor = {
-            "top": sg.y(),
-            "left": sg.x(),
-            "width": sg.width(),
-            "height": sg.height()
+            "top": sg["y"],
+            "left": sg["x"],
+            "width": sg["w"],
+            "height": sg["h"],
         }
-
 
         # フレームレート制御用タイマー (60FPS目標)
         self.timer = QTimer()
@@ -81,35 +80,29 @@ class GLDisplayWindow(QOpenGLWidget):
                     #version 330
                     in vec2 in_vert;
                     in vec2 in_text;
-                    out vec2 v_text;
+
+                    out vec2 v_uv;
+
                     void main() {
                         gl_Position = vec4(in_vert, 0.0, 1.0);
-                        v_text = in_text;
+                        v_uv = in_text;
                     }
+
                 """,
                 fragment_shader="""
-                    #version 330
+                #version 330 core
 
-                    uniform sampler2D original_tex;   // source 映像（全体）
-                    uniform sampler2D warp_uv_tex;    // warp map（各 projector 用）
+                uniform sampler2D original_tex;
+                uniform sampler2D warp_uv_tex;
 
-                    in vec2 v_text;   // 0–1（この projector の画面）
-                    out vec4 f_color;
+                in vec2 v_uv;
+                out vec4 fragColor;
 
-                    void main() {
+                void main() {
+                    vec2 warped_uv = texture(warp_uv_tex, v_uv).rg;
+                    fragColor = texture(original_tex, warped_uv);
+                }
 
-                        // 2. warp map は「ローカル座標」で読む（超重要）
-                        vec2 warp_uv = texture(warp_uv_tex, v_text).rg;
-
-                        // 無効領域は黒
-                        if (warp_uv.x < 0.0 || warp_uv.x > 1.0 ||
-                            warp_uv.y < 0.0 || warp_uv.y > 1.0) {
-                            f_color = vec4(0.0);
-                            return;
-                        }
-
-                        f_color = texture(original_tex, final_uv);
-                    }
                 """
             )
         except Exception as e:
@@ -126,17 +119,32 @@ class GLDisplayWindow(QOpenGLWidget):
         ])
 
         # 2. テクスチャ作成
-        pw = self.width()
-        ph = self.height()
+        cap_w = self.monitor["width"]
+        cap_h = self.monitor["height"]
         
         # 映像用テクスチャ (Binding 0)
-        self.texture_video = self.ctx.texture((pw, ph), 4) # BGRA=4ch
+        self.texture_video = self.ctx.texture((cap_w, cap_h), 4) # BGRA=4ch
         self.texture_video.swizzle = 'BGRA' # BGRA -> RGBへスウィズル(並び替え)
         
         # 歪み補正マップ用テクスチャ (Binding 1)
         # warp_engine から map_x, map_y を取得済みと仮定
         if self.warp_info_all:
             map_x, map_y = self.warp_info_all
+
+            # ★ 短冊サイズ
+            sw = self.monitor["width"]
+            sh = self.monitor["height"]
+
+            # ★ 念のため float 化
+            map_x = map_x.astype(np.float32)
+            map_y = map_y.astype(np.float32)
+
+            # ★ ここが決定打：短冊ローカルに正規化
+            scale_x = sw / self.width()   # 640 / 1920 = 1/3
+            scale_y = sh / self.height()  # 1080 / 1080 = 1
+
+            map_x = (map_x / sw) * scale_x
+            map_y = (map_y / sh) * scale_y
 
             if not isinstance(map_x, np.ndarray) or not isinstance(map_y, np.ndarray):
                  print(f"[FATAL ERROR] Warp map data is not a NumPy array! Type received: {type(map_x)}")
@@ -145,29 +153,50 @@ class GLDisplayWindow(QOpenGLWidget):
                  sys.exit(1)
             
             # ★ここで手順2で作った変換関数を使う
-            uv_data = convert_maps_to_uv_texture_data(
-                map_x,
-                map_y,
-                self.monitor["width"],   # source width
-                self.monitor["height"]   # source height
-            )
+            uv_data = np.dstack([map_x, map_y]).astype("f4")
+
+            warp_h, warp_w = map_x.shape  # map_x は (H, W)
 
             self.texture_warp = self.ctx.texture(
-                (pw, ph),
+                (warp_w, warp_h),
                 2,
                 data=uv_data,
                 dtype='f4'
             )
         else:
             # マップがない場合は恒等写像（歪みなし）を作る等の処理
-            self.texture_warp = self.ctx.texture((pw, ph), 2, dtype='f4') # 空
-
+            uv_data = convert_maps_to_uv_texture_data(
+                map_x,
+                map_y,
+                cap_w,     # ← source 幅（短冊）
+                cap_h      # ← source 高さ
+            )
         # シェーダーにテクスチャ番号を教える
         self.prog['original_tex'].value = 0
         self.prog['warp_uv_tex'].value = 1
 
+        print(
+            f"[DEBUG] {self.windowTitle() or 'proj'} "
+            f"map_x min/max = {map_x.min()} / {map_x.max()}, "
+            f"source_w = {self.monitor['width']}"
+        )
+
+    def resizeGL(self, w, h):
+        # ★ これが「GPUが実際に描くサイズ」
+        dpr = self.devicePixelRatioF()
+        log(f"[Qt] resizeGL logical={w}x{h}, framebuffer={int(w*dpr)}x{int(h*dpr)}")
+
     def paintGL(self):
         """毎フレーム呼ばれる描画処理"""
+
+        # ★ Qt が viewport を上書きした直後なので、ここで再設定する
+        dpr = self.devicePixelRatioF()
+
+        w = int(self.width() * dpr)
+        h = int(self.height() * dpr)
+
+        self.ctx.viewport = (0, 0, w, h)  # 1920x1080
+
         # 1. 画面キャプチャ (CPU)
         # MSSの grab は非常に高速ですが、ここのバイナリ取得だけが唯一のCPUコストです
         sct_img = self.sct.grab(self.monitor)
@@ -181,6 +210,12 @@ class GLDisplayWindow(QOpenGLWidget):
         self.texture_warp.use(1)
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
+        if not hasattr(self, "_once"):
+            self._once = True
+            print("[DEBUG MSS]")
+            print(" monitor =", self.monitor)
+            print(" sct_img.size =", sct_img.size)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
@@ -188,6 +223,9 @@ def main():
     parser.add_argument("--mode", choices=["perspective", "warp_map"], default="perspective")
     parser.add_argument("--blend", action="store_true", help="Enable alpha blending")
     args = parser.parse_args()
+
+    QApplication.setAttribute(Qt.AA_DisableHighDpiScaling)
+    QApplication.setAttribute(Qt.AA_Use96Dpi)
 
     app = QApplication(sys.argv)
 
@@ -238,17 +276,42 @@ def main():
     windows = []
     offset_x = 0
 
+    # まず source のジオメトリを取得しておく
+    source_screen = screens_by_name[args.source]
+    sg = source_screen.geometry()   # ★ source geometry はここで一度だけ
+
+    # ★ 追加：source の左上（仮想デスクトップ基準）
+    src_base_x = sg.x()
+    src_base_y = sg.y()
+
+    slice_count = len(args.targets)
+    slice_w = sg.width() // slice_count
+    slice_h = sg.height()
+
+    # 各ターゲットディスプレイごとにウィンドウを作成
     for proj_index, name in enumerate(args.targets):
+        slice_x = src_base_x + slice_w * proj_index
+        slice_y = src_base_y
+
+        slice_geometry = {
+            "x": slice_x,
+            "y": slice_y,
+            "w": slice_w,
+            "h": slice_h,
+        }
+
         if name not in screens_by_name:
             print(f"⚠️ ターゲットディスプレイが見つかりません: {name}")
             continue
 
         target_screen = screens_by_name[name]
 
+        # ★★★ ここが最重要修正 ★★★
         warp_info = prepare_warp(
             name,
             args.mode,
-            (target_screen.geometry().width(), target_screen.geometry().height()),
+            (target_screen.geometry().width(),
+             target_screen.geometry().height()),  # 1920x1080
             load_points_func=load_points,
             log_func=log
         )
@@ -259,9 +322,8 @@ def main():
             source_screen,
             target_screen,
             args.mode,
-            proj_index=proj_index,              # ★ int
-            proj_count=len(args.targets),       # ★ int
-            warp_info_all=warp_info
+            warp_info_all=warp_info,
+            source_geometry=slice_geometry # ★ source_geometry を渡す
         )
         window.show()
         windows.append(window)

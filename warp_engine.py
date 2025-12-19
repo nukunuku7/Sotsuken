@@ -1,16 +1,35 @@
-# warp_engine.py (CPU専用版)
+# warp_engine.py
+# ------------------------------------------------------------
+# Warp Engine (CPU) - Runtime Only
+# ・Blender事前計算済みwarp mapを読むだけ
+# ・実行時に物理計算は一切行わない
+# ------------------------------------------------------------
+
 import os
-import json
-import math
 import numpy as np
 import cv2
 
-# try import environment_config generated from Blender
-try:
-    from config.environment_config import environment_config
-except Exception:
-    environment_config = None
+# ----------------------------------------------------------------------
+# Warp cache directory
+# ----------------------------------------------------------------------
+WARP_CACHE_DIR = os.path.join("config", "warp_cache")
+os.makedirs(WARP_CACHE_DIR, exist_ok=True)
 
+def _warp_cache_path(display_name, mode, src_size):
+    """
+    mode:
+      - map        : ScreenSimulatorSet_X_map_WxH.npz
+      - perspective / warp_map : 派生キャッシュ
+    """
+    w, h = src_size
+    return os.path.join(
+        WARP_CACHE_DIR,
+        f"{display_name}_{mode}_{w}x{h}.npz"
+    )
+
+# ----------------------------------------------------------------------
+# In-memory cache
+# ----------------------------------------------------------------------
 warp_cache = {}
 
 # ----------------------------------------------------------------------
@@ -26,192 +45,136 @@ def _log(msg, log_func=None):
         print(msg)
 
 # ----------------------------------------------------------------------
-# Math helpers (CPU)
+# Utility
 # ----------------------------------------------------------------------
-def _normalize(v):
-    v = np.asarray(v, dtype=np.float64)
-    n = np.linalg.norm(v)
-    return v if n == 0 else v / n
-
-def _fit_plane(points):
-    pts = np.asarray(points, dtype=np.float64)
-    centroid = pts.mean(axis=0)
-    cov = np.cov((pts - centroid).T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    normal = eigvecs[:, 0]
-    u = eigvecs[:, 2]
-    v = eigvecs[:, 1]
-    return centroid, _normalize(u), _normalize(v), _normalize(normal)
-
-def _nearest_along_ray(ray_o, ray_d, points, t_min=0.0, t_max=10.0):
-    pts = np.asarray(points, dtype=np.float64)
-    vecs = pts - ray_o[None, :]
-    t_vals = np.dot(vecs, ray_d)
-    mask = t_vals > t_min
-    if not np.any(mask):
-        return None, None, None
-    candidate_pts = pts[mask]
-    ts = t_vals[mask]
-    projected = ray_o[None, :] + np.outer(ts, ray_d)
-    dists = np.linalg.norm(projected - candidate_pts, axis=1)
-    idx = np.argmin(dists)
-    best_t = ts[idx]
-    if best_t < t_min or best_t > t_max:
-        return None, None, None
-    return candidate_pts[idx], float(best_t), float(dists[idx])
-
-def _estimate_normals_for_pointcloud(pts, k=16):
-    pts = np.asarray(pts, dtype=np.float64)
-    n = len(pts)
-    normals = np.zeros_like(pts)
-    for i in range(n):
-        dists = np.linalg.norm(pts - pts[i], axis=1)
-        idx = np.argsort(dists)[:min(k, n)]
-        neigh = pts[idx]
-        centroid = neigh.mean(axis=0)
-        cov = np.cov((neigh - centroid).T)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        normals[i] = _normalize(eigvecs[:, 0])
-    return normals
-
-def _reflect(d, n):
-    d = _normalize(d)
-    n = _normalize(n)
-    return d - 2.0 * np.dot(d, n) * n
-
-# ----------------------------------------------------------------------
-# Perspective matrix
-# ----------------------------------------------------------------------
-def generate_perspective_matrix(src_size, dst_points):
-    w, h = src_size
-    src_pts = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], np.float32)
-    dst_pts = np.array(dst_points, np.float32)
-    return cv2.getPerspectiveTransform(src_pts, dst_pts)
-
-# ----------------------------------------------------------------------
-# Display map
-# ----------------------------------------------------------------------
-DISPLAY_TO_SIMSET = {}
-try:
-    with open("config/display_map.json", "r", encoding="utf-8") as f:
-        DISPLAY_TO_SIMSET = json.load(f).get("display_map", {})
-except Exception:
-    DISPLAY_TO_SIMSET = {}
-
-# ----------------------------------------------------------------------
-# prepare_warp (CPU計算のみ)
-# ----------------------------------------------------------------------
-def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
-    display_name = (
-        display_name.replace("(", "_")
-                    .replace(")", "_")
-                    .replace(" ", "_")
-                    .replace("-", "_")
-                    .replace("/", "_")
+def _sanitize(name: str) -> str:
+    return (
+        name.replace("(", "_")
+            .replace(")", "_")
+            .replace(" ", "_")
+            .replace("-", "_")
+            .replace("/", "_")
     )
 
+# ----------------------------------------------------------------------
+# UV crop (map -> sub map)
+# ----------------------------------------------------------------------
+def _crop_uv(map_x, map_y, u0, v0, u1, v1):
+    h, w = map_x.shape
+    out_x = np.zeros_like(map_x)
+    out_y = np.zeros_like(map_y)
+
+    for y in range(h):
+        fv = y / (h - 1)
+        if not (v0 <= fv <= v1):
+            continue
+
+        fv_l = (fv - v0) / (v1 - v0)
+        sy = int(fv_l * (h - 1))
+
+        for x in range(w):
+            fu = x / (w - 1)
+            if not (u0 <= fu <= u1):
+                continue
+
+            fu_l = (fu - u0) / (u1 - u0)
+            sx = int(fu_l * (w - 1))
+
+            out_x[y, x] = map_x[sy, sx]
+            out_y[y, x] = map_y[sy, sx]
+
+    return out_x, out_y
+
+# ----------------------------------------------------------------------
+# prepare_warp
+# ----------------------------------------------------------------------
+def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
+    """
+    mode:
+      - "map"          : 事前計算済み物理warpを読むだけ
+      - "perspective"  : mapからcrop
+      - "warp_map"     : mapからcrop
+    """
+
+    display_name = _sanitize(display_name)
     cache_key = (display_name, mode, src_size)
+
+    # ==========================================================
+    # ① メモリキャッシュ
+    # ==========================================================
     if cache_key in warp_cache:
         return warp_cache[cache_key]
 
-    # ---------------- perspective ----------------
-    if mode == "perspective":
-        if load_points_func:
-            pts = load_points_func(display_name, mode)
-        else:
-            cfg = f"config/projector_profiles/__._{display_name}_{mode}_points.json"
-            if not os.path.exists(cfg):
-                return None
-            with open(cfg, "r", encoding="utf-8") as f:
-                pts = json.load(f)
-
-        matrix = generate_perspective_matrix(src_size, pts[:4])
-
-        w, h = src_size
-
-        # ★ 正しいグリッド生成（X/Y を明示）
-        xs = np.tile(np.arange(w, dtype=np.float32), (h, 1))
-        ys = np.tile(np.arange(h, dtype=np.float32)[:, None], (1, w))
-
-        # ★ warpPerspective は (w, h)
-        map_x = cv2.warpPerspective(xs, matrix, (w, h))
-        map_y = cv2.warpPerspective(ys, matrix, (w, h))
-
-        # ★ convertMaps で OpenCV 正規形式へ
-        map_x, map_y = cv2.convertMaps(map_x, map_y, cv2.CV_32FC1)
-
+    # ==========================================================
+    # ② ファイルキャッシュ
+    # ==========================================================
+    cache_path = _warp_cache_path(display_name, mode, src_size)
+    if os.path.exists(cache_path):
+        _log(f"[warp] load cache: {cache_path}", log_func)
+        data = np.load(cache_path)
+        map_x = data["map_x"]
+        map_y = data["map_y"]
         warp_cache[cache_key] = (map_x, map_y)
         return map_x, map_y
 
-    # ---------------- warp_map (CPU heavy) ----------------
-    if environment_config is None:
+    # ==========================================================
+    # map は「読むだけ」
+    # ==========================================================
+    if mode == "map":
+        _log(
+            f"[warp] ERROR: precomputed map not found:\n  {cache_path}",
+            log_func
+        )
         return None
 
-    sim_idx = DISPLAY_TO_SIMSET.get(display_name)
-    if sim_idx is None:
+    # ==========================================================
+    # perspective / warp_map (mapからcrop)
+    # ==========================================================
+    _log(f"[warp] build {mode} from map: {display_name}", log_func)
+
+    base = prepare_warp(display_name, "map", src_size, load_points_func, log_func)
+    if base is None:
         return None
 
-    sim_set = environment_config["screen_simulation_sets"][sim_idx]
-    proj = sim_set["projector"]
-    mirror = sim_set["mirror"]
-    screen = sim_set["screen"]
+    if load_points_func is None:
+        _log("[warp] ERROR: load_points_func is None", log_func)
+        return None
 
-    proj_origin = np.array(proj["origin"], np.float64)
-    proj_dir = _normalize(np.array(proj["direction"], np.float64))
-    fov_h = math.radians(proj.get("fov_h", 53.13))
-    fov_v = math.radians(proj.get("fov_v", fov_h))
+    base_x, base_y = base
+    pts = np.asarray(load_points_func(display_name, mode), np.float32)
 
-    mirror_pts = np.array(mirror["vertices"], np.float64)
-    screen_pts = np.array(screen["vertices"], np.float64)
+    if len(pts) == 0:
+        _log("[warp] ERROR: no control points", log_func)
+        return None
 
-    mirror_normals = _estimate_normals_for_pointcloud(mirror_pts)
-    screen_centroid, screen_u, screen_v, screen_normal = _fit_plane(screen_pts)
+    w, h = src_size
+    us = pts[:, 0] / (w - 1)
+    vs = pts[:, 1] / (h - 1)
 
-    uv = np.stack([
-        np.dot(screen_pts - screen_centroid, screen_u),
-        np.dot(screen_pts - screen_centroid, screen_v)
-    ], axis=1)
+    u0, u1 = us.min(), us.max()
+    v0, v1 = vs.min(), vs.max()
 
-    umin, vmin = uv.min(axis=0)
-    umax, vmax = uv.max(axis=0)
+    _log(
+        f"[warp] crop area u=({u0:.3f},{u1:.3f}) "
+        f"v=({v0:.3f},{v1:.3f})",
+        log_func
+    )
 
-    w_out, h_out = src_size
-    map_x = np.zeros((h_out, w_out), np.float32)
-    map_y = np.zeros((h_out, w_out), np.float32)
+    map_x, map_y = _crop_uv(base_x, base_y, u0, v0, u1, v1)
 
-    right = _normalize(np.cross(proj_dir, [0, 0, 1]))
-    up = _normalize(np.cross(right, proj_dir))
-
-    for y in range(h_out):
-        for x in range(w_out):
-            u = (x / w_out - 0.5) * fov_h
-            v = (y / h_out - 0.5) * fov_v
-            ray = _normalize(proj_dir + right * math.tan(u) + up * math.tan(v))
-
-            hit, _, _ = _nearest_along_ray(proj_origin, ray, mirror_pts)
-            if hit is None:
-                continue
-
-            n = mirror_normals[np.argmin(np.linalg.norm(mirror_pts - hit, axis=1))]
-            refl = _reflect(ray, n)
-
-            sh, _, _ = _nearest_along_ray(hit + refl * 1e-6, refl, screen_pts)
-            if sh is None:
-                continue
-
-            rel = sh - screen_centroid
-            fu = (np.dot(rel, screen_u) - umin) / (umax - umin)
-            fv = (np.dot(rel, screen_v) - vmin) / (vmax - vmin)
-
-            if 0 <= fu <= 1 and 0 <= fv <= 1:
-                map_x[y, x] = fu * (w_out - 1)
-                map_y[y, x] = (1 - fv) * (h_out - 1)
+    np.savez(
+        cache_path,
+        map_x=map_x.astype(np.float32),
+        map_y=map_y.astype(np.float32),
+    )
 
     warp_cache[cache_key] = (map_x, map_y)
+    _log(f"[warp] cache saved: {cache_path}", log_func)
+
     return map_x, map_y
 
 # ----------------------------------------------------------------------
-# warp_image (CPUのみ)
+# warp_image (CPU)
 # ----------------------------------------------------------------------
 def warp_image(image, map_x, map_y):
     return cv2.remap(
@@ -224,10 +187,15 @@ def warp_image(image, map_x, map_y):
     )
 
 # ----------------------------------------------------------------------
-# UV map for ModernGL
+# UV map for ModernGL (pixel -> normalized UV)
 # ----------------------------------------------------------------------
 def convert_maps_to_uv_texture_data(map_x, map_y, width, height):
-    u = map_x.astype(np.float32) / width
-    v = map_y.astype(np.float32) / height
+    """
+    map_x, map_y : pixel coordinate maps (float32)
+    width, height: source image size
+    return        : bytes for GL_RG32F texture (u, v in 0–1)
+    """
+    u = map_x.astype(np.float32) / float(width)
+    v = map_y.astype(np.float32) / float(height)
     uv = np.dstack((u, v))
     return uv.astype("f4").tobytes()

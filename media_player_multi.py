@@ -2,6 +2,7 @@
 
 import sys
 import mss
+import cv2
 import signal
 import argparse
 import moderngl
@@ -29,9 +30,20 @@ class GLDisplayWindow(QOpenGLWidget):
         self.setFixedSize(g.width(), g.height())
         self.move(g.x(), g.y())
 
+        # パラメータ保存
         self.source_screen = source_screen
         self.warp_info_all = warp_info_all
-        
+
+        # スライスジオメトリ情報
+        self.slice_index = source_geometry.get("index", 0)
+        self.slice_count = source_geometry.get("count", 1)
+        self.overlap_px = source_geometry.get("overlap", 0)
+        self.enable_blend = self.slice_count > 1
+
+        slice_w = source_geometry.get("w", 1)
+        self.slice_valid_left = self.overlap_px / slice_w
+        self.slice_valid_right = 1.0 - self.slice_valid_left
+                
         # MSSの初期化 (キャプチャ範囲設定)
         self.sct = mss.mss()
         # source_screen の座標を取得
@@ -73,7 +85,16 @@ class GLDisplayWindow(QOpenGLWidget):
             -1.0,  1.0, 0.0, 0.0, # 左上
              1.0,  1.0, 1.0, 0.0, # 右上
         ], dtype='f4')
-        
+
+        # ブレンド有効化
+        if self.enable_blend:
+            self.ctx.enable(moderngl.BLEND)
+            self.ctx.blend_func = (
+                moderngl.SRC_ALPHA,
+                moderngl.ONE_MINUS_SRC_ALPHA,
+            )
+
+        # シェーダー作成
         try:
             self.prog = self.ctx.program(
                 vertex_shader="""
@@ -95,12 +116,34 @@ class GLDisplayWindow(QOpenGLWidget):
                 uniform sampler2D original_tex;
                 uniform sampler2D warp_uv_tex;
 
+                uniform float slice_left;
+                uniform float slice_right;
+                uniform int enable_blend;
+
                 in vec2 v_uv;
                 out vec4 fragColor;
 
                 void main() {
                     vec2 warped_uv = texture(warp_uv_tex, v_uv).rg;
-                    fragColor = texture(original_tex, warped_uv);
+                    warped_uv = clamp(warped_uv, 0.0, 1.0);
+                    vec4 color = texture(original_tex, warped_uv);
+
+                    if (enable_blend == 1) {
+                        float alpha = 1.0;
+
+                        // ★ 短冊の左フェード
+                        if (warped_uv.x < slice_left) {
+                            alpha = smoothstep(0.0, slice_left, warped_uv.x);
+                        }
+                        // ★ 短冊の右フェード
+                        else if (warped_uv.x > slice_right) {
+                            alpha = smoothstep(1.0, slice_right, warped_uv.x);
+                        }
+
+                        color.a *= alpha;
+                    }
+
+                    fragColor = color;
                 }
 
                 """
@@ -121,6 +164,8 @@ class GLDisplayWindow(QOpenGLWidget):
         # 2. テクスチャ作成
         cap_w = self.monitor["width"]
         cap_h = self.monitor["height"]
+
+        body_w = cap_w - self.overlap_px * 2   # 元の短冊幅
         
         # 映像用テクスチャ (Binding 0)
         self.texture_video = self.ctx.texture((cap_w, cap_h), 4) # BGRA=4ch
@@ -128,58 +173,72 @@ class GLDisplayWindow(QOpenGLWidget):
         
         # 歪み補正マップ用テクスチャ (Binding 1)
         # warp_engine から map_x, map_y を取得済みと仮定
-        if self.warp_info_all:
+        if self.warp_info_all is not None:
             map_x, map_y = self.warp_info_all
 
-            # ★ 短冊サイズ
-            sw = self.monitor["width"]
-            sh = self.monitor["height"]
+            target_w = self.width()
+            target_h = self.height()
 
-            # ★ 念のため float 化
+            cap_w = self.monitor["width"]
+            cap_h = self.monitor["height"]
+            body_w = cap_w - self.overlap_px * 2
+
             map_x = map_x.astype(np.float32)
             map_y = map_y.astype(np.float32)
 
-            # ★ ここが決定打：短冊ローカルに正規化
-            scale_x = sw / self.width()   # 640 / 1920 = 1/3
-            scale_y = sh / self.height()  # 1080 / 1080 = 1
+            # target → short strip
+            map_x = map_x * (body_w / target_w)
+            map_y = map_y * (cap_h / target_h)
 
-            map_x = (map_x / sw) * scale_x
-            map_y = (map_y / sh) * scale_y
+            # overlap
+            map_x = (map_x + self.overlap_px) / cap_w
+            map_y = map_y / cap_h
 
-            if not isinstance(map_x, np.ndarray) or not isinstance(map_y, np.ndarray):
-                 print(f"[FATAL ERROR] Warp map data is not a NumPy array! Type received: {type(map_x)}")
-                 import sys
-                 # ログを出力して終了し、原因を明確にする
-                 sys.exit(1)
-            
-            # ★ここで手順2で作った変換関数を使う
-            uv_data = np.dstack([map_x, map_y]).astype("f4")
+            # map_x, map_y は short-strip 解像度
+            # → 出力解像度にリサンプルする
+            uv_data = cv2.resize(
+                np.dstack([map_x, map_y]),
+                (target_w, target_h),
+                interpolation=cv2.INTER_LINEAR
+            ).astype("f4")
 
-            warp_h, warp_w = map_x.shape  # map_x は (H, W)
-
-            self.texture_warp = self.ctx.texture(
-                (warp_w, warp_h),
-                2,
-                data=uv_data,
-                dtype='f4'
+            print(
+                f"[DEBUG] {self.windowTitle() or 'proj'} "
+                f"map_x min/max = {map_x.min()} / {map_x.max()}, "
+                f"source_w = {self.monitor['width']}"
             )
+
         else:
-            # マップがない場合は恒等写像（歪みなし）を作る等の処理
-            uv_data = convert_maps_to_uv_texture_data(
-                map_x,
-                map_y,
-                cap_w,     # ← source 幅（短冊）
-                cap_h      # ← source 高さ
+            # warp_map が無い場合：恒等UVを自前生成
+            cap_w = self.monitor["width"]
+            cap_h = self.monitor["height"]
+
+            xs = np.linspace(0.0, 1.0, cap_w, dtype=np.float32)
+            ys = np.linspace(0.0, 1.0, cap_h, dtype=np.float32)
+
+            u, v = np.meshgrid(xs, ys)
+            uv_data = np.dstack([u, v]).astype("f4")
+
+            print(
+                f"[DEBUG] {self.windowTitle() or 'proj'} "
+                f"identity UV map, source_w = {self.monitor['width']}"
             )
+
+        warp_h, warp_w = uv_data.shape[:2]
+
+        self.texture_warp = self.ctx.texture(
+            (warp_w, warp_h),
+            2,
+            data=uv_data,
+            dtype='f4'
+        )
+
         # シェーダーにテクスチャ番号を教える
         self.prog['original_tex'].value = 0
         self.prog['warp_uv_tex'].value = 1
-
-        print(
-            f"[DEBUG] {self.windowTitle() or 'proj'} "
-            f"map_x min/max = {map_x.min()} / {map_x.max()}, "
-            f"source_w = {self.monitor['width']}"
-        )
+        self.prog["slice_left"].value = self.slice_valid_left
+        self.prog["slice_right"].value = self.slice_valid_right
+        self.prog["enable_blend"].value = 1 if self.enable_blend else 0
 
     def resizeGL(self, w, h):
         # ★ これが「GPUが実際に描くサイズ」
@@ -285,7 +344,9 @@ def main():
     src_base_y = sg.y()
 
     slice_count = len(args.targets)
+    overlap_ratio = 0.1 if slice_count > 1 else 0.0
     slice_w = sg.width() // slice_count
+    overlap_px = int(slice_w * overlap_ratio)
     slice_h = sg.height()
 
     # 各ターゲットディスプレイごとにウィンドウを作成
@@ -293,11 +354,25 @@ def main():
         slice_x = src_base_x + slice_w * proj_index
         slice_y = src_base_y
 
+        # オーバーラップ分を拡張
+        cap_x = slice_x - overlap_px
+        cap_w = slice_w + overlap_px * 2
+
+        # 画面外に出ないようにクランプ
+        cap_x = max(src_base_x, cap_x)
+
+        # 右端もはみ出さないように
+        max_x = src_base_x + sg.width() - cap_w
+        cap_x = min(cap_x, max_x)
+
         slice_geometry = {
-            "x": slice_x,
+            "x": cap_x,
             "y": slice_y,
-            "w": slice_w,
+            "w": cap_w,
             "h": slice_h,
+            "index": proj_index,
+            "count": slice_count,
+            "overlap": overlap_px,
         }
 
         if name not in screens_by_name:
@@ -310,8 +385,8 @@ def main():
         warp_info = prepare_warp(
             name,
             args.mode,
-            (target_screen.geometry().width(),
-             target_screen.geometry().height()),  # 1920x1080
+            (slice_geometry["w"],
+             slice_geometry["h"]),  # 1920x1080
             load_points_func=load_points,
             log_func=log
         )

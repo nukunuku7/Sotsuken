@@ -12,3 +12,6 @@ projector_profiles/*.json
 
 # tomlからのロックファイルも無視
 *.lock
+
+# .vscodeの無視を追加
+.vscode/

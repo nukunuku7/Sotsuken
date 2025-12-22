@@ -319,8 +319,8 @@ class MainWindow(QMainWindow):
         source_display = self.edit_display_name
 
         # virtual id を左→右順で生成
-        target_display_names = [
-            screen.name()
+        target_virtual_ids = [
+            get_virtual_id(screen.name())
             for screen in ordered_screens
         ]
 
@@ -332,7 +332,7 @@ class MainWindow(QMainWindow):
             script_path,
             "--source", source_display,
             "--mode", mode,
-            "--targets", *target_display_names,
+            "--targets", *target_virtual_ids,
         ]
 
         print("[DEBUG] cmd:", cmd)

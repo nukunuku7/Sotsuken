@@ -1,7 +1,5 @@
-# precompute_warp_maps.py
 import os
 import math
-import json
 import time
 import numpy as np
 from pathlib import Path
@@ -12,6 +10,13 @@ from config.environment_config import environment_config
 
 WARP_CACHE_DIR = os.path.join("config", "warp_cache")
 os.makedirs(WARP_CACHE_DIR, exist_ok=True)
+
+# ===========================
+# Optoma internal DSP model
+# ===========================
+KEYSTONE_V_DEG = 40.0          # Projector setting (+40)
+KEYSTONE_STRENGTH = math.tan(math.radians(KEYSTONE_V_DEG))
+KEYSTONE_GAMMA = 1.85          # Optoma-like nonlinearity
 
 # ---------------- math helpers ----------------
 def _normalize(v):
@@ -48,19 +53,16 @@ def _estimate_normals(pts, k=16):
     return normals
 
 def _reflect(d, n):
-    return d - 2*np.dot(d,n)*n
+    return d - 2*np.dot(d, n)*n
 
 # ---------------- main ----------------
 def compute_all_maps(src_size):
     w, h = src_size
 
-    # environment_config.py から直接取得
-    # display_map が無い場合は index 順に処理
     sim_sets = environment_config["screen_simulation_sets"]
 
     for sim_idx, sim in enumerate(sim_sets):
         display_name = sim.get("name", f"display_{sim_idx}")
-
         print(f"[compute] {display_name} {w}x{h}")
 
         proj = sim["projector"]
@@ -98,10 +100,16 @@ def compute_all_maps(src_size):
                 elapsed = time.time() - start
                 print(f"  {int(y / h * 100)}%  elapsed: {elapsed:.1f}s")
 
+            v_angle = (y / h - 0.5) * fov_v
+
             for x in range(w):
-                u = (x / w - 0.5) * fov_h
-                v = (y / h - 0.5) * fov_v
-                ray = _normalize(proj_d + right * math.tan(u) + up * math.tan(v))
+                u_angle = (x / w - 0.5) * fov_h
+
+                ray = _normalize(
+                    proj_d
+                    + right * math.tan(u_angle)
+                    + up * math.tan(v_angle)
+                )
 
                 hit = _nearest_along_ray(proj_o, ray, mirror_pts)
                 if hit is None:
@@ -118,6 +126,12 @@ def compute_all_maps(src_size):
                 fu = (np.dot(rel, sc_u) - umin) / (umax - umin)
                 fv = (np.dot(rel, sc_v) - vmin) / (vmax - vmin)
 
+                # ===== Optoma nonlinear keystone (image space) =====
+                dy = fv - 0.5
+                scale = 1.0 - KEYSTONE_STRENGTH * np.sign(dy) * (abs(dy) ** KEYSTONE_GAMMA)
+                fu = (fu - 0.5) * scale + 0.5
+                # ==================================================
+
                 if 0 <= fu <= 1 and 0 <= fv <= 1:
                     map_x[y, x] = fu * (w - 1)
                     map_y[y, x] = (1 - fv) * (h - 1)
@@ -130,4 +144,4 @@ def compute_all_maps(src_size):
         print(f"  saved -> {path}")
 
 if __name__ == "__main__":
-    compute_all_maps((1920,1080))
+    compute_all_maps((1920, 1080))

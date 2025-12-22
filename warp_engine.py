@@ -1,11 +1,14 @@
 # warp_engine.py
 # ------------------------------------------------------------
-# Warp Engine (CPU) - Runtime Only
-# ・Blender事前計算済みwarp mapを読むだけ
-# ・実行時に物理計算は一切行わない
+# Warp Engine (Runtime Only / Safe Version)
+#
+# ・Blender による事前計算済み warp map (.npz) を「読むだけ」
+# ・Runtime では一切の物理計算・crop・補間生成を行わない
+# ・事前計算ファイルが無ければ、明示的にエラーを出して停止
 # ------------------------------------------------------------
 
 import os
+import sys
 import numpy as np
 import cv2
 
@@ -14,18 +17,6 @@ import cv2
 # ----------------------------------------------------------------------
 WARP_CACHE_DIR = os.path.join("config", "warp_cache")
 os.makedirs(WARP_CACHE_DIR, exist_ok=True)
-
-def _warp_cache_path(display_name, mode, src_size):
-    """
-    mode:
-      - map        : ScreenSimulatorSet_X_map_WxH.npz
-      - perspective / warp_map : 派生キャッシュ
-    """
-    w, h = src_size
-    return os.path.join(
-        WARP_CACHE_DIR,
-        f"{display_name}_{mode}_{w}x{h}.npz"
-    )
 
 # ----------------------------------------------------------------------
 # In-memory cache
@@ -56,48 +47,42 @@ def _sanitize(name: str) -> str:
             .replace("/", "_")
     )
 
-# ----------------------------------------------------------------------
-# UV crop (map -> sub map)
-# ----------------------------------------------------------------------
-def _crop_uv(map_x, map_y, u0, v0, u1, v1):
-    h, w = map_x.shape
-    out_x = np.zeros_like(map_x)
-    out_y = np.zeros_like(map_y)
-
-    for y in range(h):
-        fv = y / (h - 1)
-        if not (v0 <= fv <= v1):
-            continue
-
-        fv_l = (fv - v0) / (v1 - v0)
-        sy = int(fv_l * (h - 1))
-
-        for x in range(w):
-            fu = x / (w - 1)
-            if not (u0 <= fu <= u1):
-                continue
-
-            fu_l = (fu - u0) / (u1 - u0)
-            sx = int(fu_l * (w - 1))
-
-            out_x[y, x] = map_x[sy, sx]
-            out_y[y, x] = map_y[sy, sx]
-
-    return out_x, out_y
+def _warp_cache_path(display_name, src_size):
+    w, h = src_size
+    return os.path.join(
+        WARP_CACHE_DIR,
+        f"{display_name}_map_{w}x{h}.npz"
+    )
 
 # ----------------------------------------------------------------------
-# prepare_warp
+# prepare_warp (Runtime Only)
 # ----------------------------------------------------------------------
-def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
+def prepare_warp(
+    display_name,
+    mode,
+    src_size,
+    load_points_func=None,  # 互換性のため残す（使用しない）
+    log_func=None,
+):
     """
-    mode:
-      - "map"          : 事前計算済み物理warpを読むだけ
-      - "perspective"  : mapからcrop
-      - "warp_map"     : mapからcrop
+    Runtime では mode="map" のみを許可する。
+    それ以外は設計ミスとして即エラー。
     """
+
+    # ==========================================================
+    # mode チェック（事故防止）
+    # ==========================================================
+    if mode != "map":
+        _log(
+            "[warp] FATAL: runtime supports only mode='map'\n"
+            f"        requested mode = '{mode}'\n"
+            "        Please fix caller logic.",
+            log_func,
+        )
+        raise RuntimeError("Invalid warp mode at runtime")
 
     display_name = _sanitize(display_name)
-    cache_key = (display_name, mode, src_size)
+    cache_key = (display_name, src_size)
 
     # ==========================================================
     # ① メモリキャッシュ
@@ -106,81 +91,47 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
         return warp_cache[cache_key]
 
     # ==========================================================
-    # ② ファイルキャッシュ
+    # ② ファイルキャッシュ（必須）
     # ==========================================================
-    cache_path = _warp_cache_path(display_name, mode, src_size)
-    if os.path.exists(cache_path):
-        _log(f"[warp] load cache: {cache_path}", log_func)
-        data = np.load(cache_path)
-        map_x = data["map_x"]
-        map_y = data["map_y"]
-        warp_cache[cache_key] = (map_x, map_y)
-        return map_x, map_y
+    cache_path = _warp_cache_path(display_name, src_size)
 
-    # ==========================================================
-    # map は「読むだけ」
-    # ==========================================================
-    if mode == "map":
+    if not os.path.exists(cache_path):
         _log(
-            f"[warp] ERROR: precomputed map not found:\n  {cache_path}",
-            log_func
+            "[warp] FATAL: precomputed warp map not found\n"
+            f"        expected file:\n"
+            f"        {cache_path}\n\n"
+            "        Please run:\n"
+            "          python precompute_warp_maps.py\n"
+            "        before starting the media player.",
+            log_func,
         )
-        return None
+        # 強制停止（半端に続行させない）
+        raise FileNotFoundError(cache_path)
 
     # ==========================================================
-    # perspective / warp_map (mapからcrop)
+    # ③ 読み込み
     # ==========================================================
-    _log(f"[warp] build {mode} from map: {display_name}", log_func)
+    _log(f"[warp] load precomputed map: {cache_path}", log_func)
 
-    base = prepare_warp(display_name, "map", src_size, load_points_func, log_func)
-    if base is None:
-        return None
-
-    if load_points_func is None:
-        _log("[warp] ERROR: load_points_func is None", log_func)
-        return None
-
-    base_x, base_y = base
-    pts = np.asarray(load_points_func(display_name, mode), np.float32)
-
-    if len(pts) == 0:
-        _log("[warp] ERROR: no control points", log_func)
-        return None
-
-    w, h = src_size
-    us = pts[:, 0] / (w - 1)
-    vs = pts[:, 1] / (h - 1)
-
-    u0, u1 = us.min(), us.max()
-    v0, v1 = vs.min(), vs.max()
-
-    _log(
-        f"[warp] crop area u=({u0:.3f},{u1:.3f}) "
-        f"v=({v0:.3f},{v1:.3f})",
-        log_func
-    )
-
-    map_x, map_y = _crop_uv(base_x, base_y, u0, v0, u1, v1)
-
-    np.savez(
-        cache_path,
-        map_x=map_x.astype(np.float32),
-        map_y=map_y.astype(np.float32),
-    )
+    data = np.load(cache_path)
+    map_x = data["map_x"].astype(np.float32)
+    map_y = data["map_y"].astype(np.float32)
 
     warp_cache[cache_key] = (map_x, map_y)
-    _log(f"[warp] cache saved: {cache_path}", log_func)
-
     return map_x, map_y
 
 # ----------------------------------------------------------------------
-# warp_image (CPU)
+# warp_image (CPU, optional utility)
 # ----------------------------------------------------------------------
 def warp_image(image, map_x, map_y):
+    """
+    CPU 用 warp（デバッグ・検証用）
+    Runtime 表示では GPU 側 UV warp を使用する想定
+    """
     return cv2.remap(
         image,
-        map_x.astype(np.float32),
-        map_y.astype(np.float32),
+        map_x,
+        map_y,
         interpolation=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
@@ -195,7 +146,7 @@ def convert_maps_to_uv_texture_data(map_x, map_y, width, height):
     width, height: source image size
     return        : bytes for GL_RG32F texture (u, v in 0–1)
     """
-    u = map_x.astype(np.float32) / float(width)
-    v = map_y.astype(np.float32) / float(height)
-    uv = np.dstack((u, v))
-    return uv.astype("f4").tobytes()
+    u = map_x / float(width)
+    v = map_y / float(height)
+    uv = np.dstack((u, v)).astype(np.float32)
+    return uv.tobytes()

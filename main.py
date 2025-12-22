@@ -35,6 +35,15 @@ def load_edit_profile():
             return json.load(f).get("display")
     return None
 
+def get_simulator_name_for_screen(screen, edit_display_name):
+    screens = [
+        s for s in QGuiApplication.screens()
+        if s.name() != edit_display_name
+    ]
+    screens = sorted(screens, key=lambda s: s.geometry().x())
+    idx = screens.index(screen) + 1
+    return f"ScreenSimulatorSet_{idx}"
+
 def get_display_mapping():
     screens = QGuiApplication.screens()
     ordered = sorted(screens, key=lambda s: s.geometry().x())
@@ -80,7 +89,23 @@ class MainWindow(QMainWindow):
         self.init_display_info()
         self.init_projector_list()
 
+    def has_precomputed_warp(self, display_name, screen):
+        simulator = get_simulator_name_for_screen(screen, self.edit_display_name)
+        w = screen.geometry().width()
+        h = screen.geometry().height()
+        path = CONFIG_DIR / "warp_cache" / f"{simulator}_map_{w}x{h}.npz"
+        return path.exists()
+
     def init_display_info(self):
+        saved = load_edit_profile()
+
+        # ① 保存済み設定があればそれを使う
+        if saved:
+            self.edit_display_name = saved
+            self.label.setText(f"編集用ディスプレイ：{self.edit_display_name}")
+            return
+
+        # ② なければ初回のみ primary を使って保存
         screen = QGuiApplication.primaryScreen()
         if screen:
             self.edit_display_name = screen.name()
@@ -251,29 +276,66 @@ class MainWindow(QMainWindow):
         )
 
     def launch_correction_display(self):
-        selected_names = []
+        print("[DEBUG] launch_correction_display called")
+
+        # チェックされたディスプレイ（PyQt名）を取得
+        selected_screens = []
         for i in range(self.projector_list.count()):
             item = self.projector_list.item(i)
             if item.checkState() == Qt.Checked:
-                selected_names.append(item.data(Qt.UserRole))
+                selected_screens.append(item.data(Qt.UserRole))
 
-        if not selected_names:
-            QMessageBox.warning(self, "警告", "出力先ディスプレイが選択されていません")
+        print("[DEBUG] selected:", selected_screens)
+
+        if not selected_screens:
+            print("[ERROR] no display selected")
             return
 
-        mode = self.mode_selector.currentText()
+        # 左→右順に並び替え
+        screens_with_x = []
+        for screen in QGuiApplication.screens():
+            if screen.name() in selected_screens:
+                screens_with_x.append((screen, screen.geometry().x()))
+
+        screens_with_x.sort(key=lambda t: t[1])
+        ordered_screens = [s for s, _ in screens_with_x]
+
+        # warp map の存在チェック
+        for screen in ordered_screens:
+            simulator = get_simulator_name_for_screen(screen, self.edit_display_name)
+            w, h = screen.geometry().width(), screen.geometry().height()
+            path = CONFIG_DIR / "warp_cache" / f"{simulator}_map_{w}x{h}.npz"
+            print(f"[DEBUG] checking warp: {path}")
+
+            if not path.exists():
+                print("[ERROR] warp map missing!")
+                return
+
+        # ===== media_player_multi 起動 =====
+        print("[DEBUG] launching media_player_multi")
+
+        script_path = str(BASE_DIR / "media_player_multi.py")
+
         source_display = self.edit_display_name
-        targets = [get_virtual_id(n) for n in selected_names]
+
+        # virtual id を左→右順で生成
+        target_virtual_ids = [
+            get_virtual_id(screen.name())
+            for screen in ordered_screens
+        ]
+
+        mode_ui = self.mode_selector.currentText()
+        mode = "map" if mode_ui == "warp_map" else "perspective"
 
         cmd = [
             sys.executable,
-            str(BASE_DIR / "media_player_multi.py"),
+            script_path,
             "--source", source_display,
-            "--targets", *targets,
             "--mode", mode,
+            "--targets", *target_virtual_ids,
         ]
-        if len(selected_names) > 1:
-            cmd.append("--blend")
+
+        print("[DEBUG] cmd:", cmd)
         subprocess.Popen(cmd)
 
 def is_gpu_available_main():

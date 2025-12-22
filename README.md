@@ -1,282 +1,272 @@
-## 🛠️ **開発環境**
-* エディタ：VS Code
-* ターミナル：PowerShell（VS Code統合ターミナル）
-* Blender（この研究で使うスクリーンのモデル）
+了解です。
+**「今の実装仕様（environment_config.py が Python / 事前計算あり / main.py はランチャ）」**に合わせて、README を**研究用途としてそのまま配布できるレベル**まで整理して書き直します。
 
-## 📝 `README.md`（プロジェクターゆがみ補正＆マルチスクリーン統合投影システム）
+以下は **修正版 README.md（全文差し替え想定）** です。
+そのまま `README.md` に貼り替えて使えます。
+
+---
 
 # Projector Warp System
-360°スクリーン＋複数プロジェクター＋凸面鏡構成において、歪み補正済みのPC画面を自然に表示するためのPythonベースのプロジェクションシステムです。
+
+**360°スクリーン対応・マルチプロジェクター歪み補正投影システム**
+
+---
 
 ## 🎯 概要
-このアプリケーションは、以下の構成を持つプロジェクション環境に対応しています：
 
-- 複数のプロジェクター（任意の台数）
-- 凸面鏡経由の360°スクリーン投影
-- 各ディスプレイごとの歪み補正（射影変換 or 自由変形）
-- モード切替に応じた自動初期グリッド生成と編集
-- 重なり部分のアルファブレンディング対応（左右10°）
-- JSONファイルから情報を得てレイトレーシング
+本システムは、
 
-## 📦 動作の流れ
-- 自動的に編集用ディスプレイを認識
-- GUIから補正モード（`perspective` / `warp_map`）を選択
-- 各スクリーンに応じた最適な初期グリッドを自動生成
-- グリッドのGUI編集（ズーム・パン・ドラッグ対応）
-- 編集後、補正された画面をリアルタイム表示
-- ウィンドウや動画、ゲームも自然な表示に対応
+* **360°スクリーン**
+* **複数プロジェクター**
+* **凸面鏡（反射投影）**
+* **Blenderで作成した物理モデル**
+
+を用いた環境において、
+**歪み補正済みの映像をリアルタイムに表示するための Python ベース投影システム**です。
+
+### 特徴
+
+* Blender 上で作成した **スクリーン・鏡・プロジェクター配置**を使用
+* 幾何情報をもとに **事前計算（Warp Map 生成）**
+* 実行時は **軽量・高速描画**
+* GUI による **補正方式切替・グリッド編集**
+* 複数ディスプレイ・オーバーラップ領域対応（ブレンド）
+
+---
+
+## 🛠️ 開発環境
+
+* エディタ：VS Code
+* ターミナル：PowerShell（VS Code 統合）
+* DCC ツール：Blender
+* OS：Windows 10 / 11（複数ディスプレイ必須）
+
+---
+
+## 📦 システム全体の流れ（重要）
+
+```
+① Blender で投影環境をモデリング
+        ↓
+② environment_config.py を生成・保存
+        ↓
+③ 事前計算スクリプトで Warp Map を生成
+        ↓
+④ main.py を起動（編集・表示）
+        ↓
+⑤ media_player_multi.py が補正表示を実行
+```
+
+👉 **実行時に重い計算は行いません**
+👉 時間がかかる処理はすべて「事前計算」に切り出されています
+
+---
 
 ## 🧩 ディレクトリ構成
 
 ```
 Sotsuken/
-│  LICENSE.txt　#ライセンス
-│  main.py　# 起動＆UI・編集／表示操作
-│  media_player_multi.py　# 各プロジェクターへ補正表示
-│  percentage.py　# ピクセル使用率の確認
-│  README.md　# 説明書
-│  warp_engine.py　# 歪み補正ロジック（OpenCV）
-│  
+│  LICENSE.txt
+│  README.md
+│
+│  main.py                  # GUIランチャ（編集・表示制御）
+│  media_player_multi.py    # 補正済み映像のマルチ出力
+│  warp_engine.py           # 歪み補正コア（OpenCV / CUDA）
+│  precompute_warp_maps.py  # 事前計算（Warp Map生成）
+│
 ├─config
-│  │  edit_profile.json　# 編集用ディスプレイ情報
-│  │  environment_config.py　# スクリーン・鏡・プロジェクター定義
+│  │  edit_profile.json
+│  │  environment_config.py   # Blender由来の物理環境定義（重要）
 │  │
-│  └─projector_profiles　# 各ディスプレイ用グリッド保存
-│         __._DISPLAY2_perspective_points.json
-│         __._DISPLAY3_perspective_points.json
-│         __._DISPLAY4_perspective_points.json
+│  └─projector_profiles
+│        __._DISPLAY2_perspective_points.json
+│        __._DISPLAY3_warp_map_points.json
 │
 ├─editor
-│     grid_editor_perspective.py　# perspectiveグリッド編集GUI
-│     grid_editor_warpmap.py　# warp_mapグリッド編集GUI
-│     grid_utils.py　# グリッド点生成の共通関数
+│     grid_editor_perspective.py
+│     grid_editor_warpmap.py
+│     grid_utils.py
 │
-└─temp　# エディター自動終了用ロックファイル
-
+└─temp
+       editor_active_*.lock
 ```
 
-## 🖥 使用方法
+---
 
-### 1. 起動
-```bash
+## 🧱 Blender → Python への事前準備（重要）
+
+### 1️⃣ Blender でモデルを作成
+
+Blender 上で以下を **正確なスケール・位置関係**で作成します。
+
+* スクリーン（360°曲面）
+* 凸面鏡
+* プロジェクター（位置・向き・FOV）
+
+### 推奨ルール
+
+* 単位：**メートル**
+* Z軸：上方向
+* 原点：床中心 or 観察者基準
+
+---
+
+### 2️⃣ Blender から情報を Python に書き出す
+
+Blender の Python から以下を取得し、
+**Pythonファイルとして保存**します。
+
+📄 `config/environment_config.py`
+
+```python
+# Auto-generated from Blender
+
+environment_config = {
+
+    "screen_simulation_sets": [
+        {
+            "name": "ScreenSimulatorSet_1",
+
+            "projector": {
+                "origin": [1.2, -3.4, 2.1],
+                "direction": [0.0, 1.0, -0.1],
+                "fov_h": 90.0,
+                "fov_v": 60.0,
+                "resolution": [1920, 1080]
+            },
+
+            "mirror": {
+                "vertices": [
+                    [0.5, 0.2, 1.1],
+                    [0.6, 0.2, 1.1],
+                    ...
+                ]
+            },
+
+            "screen": {
+                "material": "Screen_mat",
+                "vertices": [
+                    [2.1, 3.0, 1.5],
+                    [2.2, 3.1, 1.6],
+                    ...
+                ]
+            }
+        },
+
+        # 複数プロジェクター分
+    ],
+
+    "observer": [0.0, 0.0, 1.65]
+}
+```
+
+### 🔴 注意
+
+* **JSONではありません**
+* Python の `dict` として **直接 import されます**
+* 10万行規模でも問題ありません（事前計算専用）
+
+---
+
+## ⚙️ 事前計算（必須）
+
+### Warp Map を事前生成
+
+```powershell
+python precompute_warp_maps.py
+```
+
+この処理で：
+
+* Blenderモデル
+* プロジェクター
+* 鏡
+* スクリーン
+
+を使って **ピクセル単位の歪み補正マップ**を生成します。
+
+💡 この処理は **重いが1回だけ**
+
+---
+
+## 🖥 実行（main.py）
+
+事前計算が終わったら、通常の起動はこちら：
+
+```powershell
 python main.py
 ```
 
-### 2. 操作手順
+### main.py の役割
 
-1. 起動すると「編集用ディスプレイ（メイン）」が自動認識されます。
-2. 「補正方式を選択」から `perspective` か `warp_map` をプロジェクションマッピング対象の物体に合わせて選びます。
-3. 「グリッドエディター起動」を押すと、チェックボックスで指定したスクリーンのグリッド編集ウィンドウが起動。
-4. 点をドラッグして微調整し、閉じれば自動保存。
+* 編集用ディスプレイの自動認識
+* 補正方式の選択
+* グリッド編集の起動
+* 補正表示の起動（事前計算結果を使用）
 
-#### ⚠️ 注意：
-新しくグリッドエディターを開くと、既存のグリッドは初期状態に戻ります。編集済みのグリッドがある場合は必ず保存・閉じた後に新しいエディターを起動してください。
+👉 **main.py 自体は重い計算をしません**
 
-5. 「補正表示起動」を押すと、補正済みの画面がプロジェクター側に表示されます。
+---
 
 ## 🛠 補正モード
 
-### - perspective
+### perspective
 
-* 4点の射影変換を利用
-* 画面の歪みを補正して長方形に投影
+* 4点射影変換
+* 平面・簡易構成向け
+* 軽量・高速
 
-### - warp\_map
+### warp_map
 
-* 外周グリッドを自由変形しマッピング
-* 曲面スクリーン・オーバーラップ領域に有効
+* 多点グリッド（例：6×6）
+* 曲面スクリーン対応
+* オーバーラップ・ブレンド可能
 
-* 自動保存・自動終了機能付き（ロックファイルで制御）
+---
 
-## ⚙️ 環境設定ファイル：`settings/config/environment_config.py`
+## ⏱ 実行時の速度について
 
-```python
-environment_config = {
-  "screen_simulation_sets": [
-    {
-      "name": "ScreenSimulatorSet_1",
-      "projector": {
-        "origin": [...],
-        "direction": [...],
-        "fov_h": ...,
-        "fov_v": ...,
-        "resolution": [...]
-      },
-      "mirror": {
-        "vertices": [ [...], [...] ]
-      },
-      "screen": {
-        "material": "Screen_mat",
-        "vertices": [ [...], [...] ]
-      }
-    },
+| 処理               | 実行タイミング | 時間     |
+| ---------------- | ------- | ------ |
+| Blender → Python | 事前      | 人力     |
+| Warp Map 計算      | 事前      | 数秒〜数分  |
+| main.py 起動       | 実行時     | 即時     |
+| 補正表示             | 実行時     | リアルタイム |
 
-    ''' 3セット分 '''
+✔ **事前計算が終わっていれば、起動は速い**
 
-  ],
+---
 
-  "observer": [x, y, z]
-}
+## 🖥 ハードウェア構成（例）
 
-```
+* CPU：Intel Core i9
+* GPU：RTX 4070 Ti SUPER
+* メモリ：32GB
+* プロジェクター：Optoma GT1080 ×3
+* 編集用モニター：1台
 
-## 🎮 対応する表示コンテンツ
+---
 
-* Unityによる360度コンテンツ
-* YouTubeやVLCでの動画再生
-* 任意のPCウィンドウ（ブラウザ・ゲームなど）
+## ⚠️ 注意点まとめ
 
-## 🖥️ **ハードウェア構成**
+* `environment_config.py` は **JSONではない**
+* 事前計算を忘れると起動時に遅くなる
+* 新しい Blender モデルを使ったら **必ず再計算**
+* 複数ディスプレイ必須
 
-* **PCスペック**：
-  * CPU: Intel Core i9
-  * GPU: GeForce RTX 4070 Ti SUPER
-  * メモリ: DDR5 32GB (16GB x2)
-  * ストレージ: M.2 SSD 2TB
-
-* **表示機器**：
-  * プロジェクター：オプトマ GT1080 x 3台（表示用）
-  * モニター：1台（編集用）
-
-## 📌 必要環境
-
-* Python 3.x.x
-* OpenCV
-* PyQt5
-* tkinter
-* numpy
-* Windows 10/11 64bit（複数ディスプレイ必須）
-
-## ⚠️ 注意点
-
-* 起動時に各ディスプレイにポイントファイルがない場合、自動生成されます。
-* 編集後は必ずウィンドウを閉じるか、ロックファイルを削除して自動保存・終了させてください。
-* 新しいグリッドエディターを開くと既存のグリッドは初期状態に戻ります。編集済みグリッドは必ず保存してください。
-* すべての表示はリアルタイムにリマップされるため、マシンスペックに依存します。
+---
 
 ## 📄 ライセンス
 
-custom License
+Custom License（研究用途）
 
 ---
 
-# 追加機能について
+## 💡 設計思想（補足）
 
-## 🛠️ **GPU対応とCUDAビルドに関する設定**
-
-### 💻 GPU使用条件
-本プロジェクトでは、OpenCV の CUDA モジュールおよび CuPy を使用することで、GPU 上で高速に歪み補正処理を実行できます。ただし、以下の条件が揃っている必要があります：
-
-- NVIDIA GPU が搭載されていること  
-  （RTX 4070 Ti SUPER など、CUDA 対応 GPU）  
-- GPU ドライバーが対応する CUDA バージョンをサポートしていること  
-  （例：CUDA 12.3 で CuPy 13.2、OpenCV 4.x の CUDA ビルド）  
-- OpenCV が CUDA サポート付きでビルドされていること  
-
-#### ⚠️ 注意：
-- ドライバーや CUDA バージョンが不適合の場合、CPU モードで動作します。  
-- OpenCV の Python パッケージ（`opencv-python`）は通常 CPU ビルドのため、GPU 処理には **CUDA ビルド** が必須です。
+* **重い処理はすべてオフライン**
+* 実行時は **GPU転送＋描画のみ**
+* Blender を「設計ツール」として使う
+* Python は「実行エンジン」
 
 ---
-
-### 🏗 CUDA ビルドが必要になる条件
-以下の条件に当てはまる場合は、OpenCV を CUDA 対応でビルドしてください：
-
-1. `cv2.cuda.getCudaEnabledDeviceCount()` が 0 を返す  
-2. 歪み補正処理をリアルタイムで行いたい  
-3. 複数ディスプレイや高解像度（1920x1080 × 複数）での出力が遅い  
-
----
-
-### ⚙️ CUDA ビルド手順（Windows + Python）
-
-1. **依存ライブラリのインストール**
-```powershell
-# 事前に管理者権限のpowershellで以下を実行
-Set-ExecutionPolicy Bypass -Scope Process -Force`
-[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; `
-iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-
-# 入った来夏で確認し、バージョンが表示されれば次を実行
-choco --version
-
-# 必要なビルドツール
-choco install cmake
-choco install git
-```
-
-####　※この時点での注意事項
-cmakeがインストールされていなかった場合、以下のリンクからインストールしてください。
-https://cmake.org/download/
-
-2. **OpenCV ソースコードの取得**
-
-```powershell
-git clone https://github.com/opencv/opencv.git
-git clone https://github.com/opencv/opencv_contrib.git
-```
-
-3. **CMake で CUDA ビルド設定**
-
-```powershell
-cd opencv
-mkdir build
-cd build
-cmake -G "Visual Studio 17 2022" ^
-      -A x64 ^
-      -D CMAKE_BUILD_TYPE=Release ^
-      -D CMAKE_INSTALL_PREFIX=..\install ^
-      -D OPENCV_EXTRA_MODULES_PATH=..\opencv_contrib\modules ^
-      -D WITH_CUDA=ON ^
-      -D CUDA_ARCH_BIN=86 ^             # RTX 4070 Ti に対応
-      -D BUILD_opencv_python3=ON ^
-      -D BUILD_EXAMPLES=OFF ..
-```
-
-4. **ビルド & インストール**
-
-```powershell
-cmake --build . --config Release --target INSTALL
-```
-
-5. **Python 環境にインストール**
-
-```powershell
-# install フォルダ内の cv2.pyd を仮想環境にコピーするか、
-# PYTHONPATH に追加
-set PYTHONPATH=%CD%\install\python;%PYTHONPATH%
-```
-
----
-
-### ✅ 動作確認
-
-```python
-import cv2
-import cupy
-
-# CuPy デバイス確認
-print("CuPy devices:", cupy.cuda.runtime.getDeviceCount())
-
-# OpenCV CUDA デバイス確認
-print("cv2.cuda devices:", cv2.cuda.getCudaEnabledDeviceCount())
-```
-
-* 両方とも 1 以上を返せば GPU 処理が可能です
-* `0` を返す場合は、CUDA ビルドやドライバー、CUDA バージョンを再確認してください
-
----
-
-### ⚡ GPU 利用上の注意
-
-* GPU 使用時は、他のアプリケーション（ブラウザ、VSCode など）が GPU メモリを占有していると、CUDA メモリ不足で CPU fallback になる場合があります
-* 複数ディスプレイ投影時は GPU メモリ消費が大きくなるため、RTX 4070 Ti 以上を推奨
-* CuPy + OpenCV CUDA は独立して GPU メモリを使用するため、併用時は余裕を持たせること
-
----
-
-💡 **まとめ**
-
-* CPU モードでの動作も可能だが、リアルタイム性は落ちる
-* GPU を有効にするには OpenCV の CUDA ビルドと対応 GPU ドライバーが必須
-* CuPy は簡単に GPU 処理が確認できるため、まず CuPy が GPU を認識するかチェックすると良い

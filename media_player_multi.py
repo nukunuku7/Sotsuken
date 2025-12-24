@@ -1,98 +1,82 @@
 import sys
-import mss
-import cv2
-import signal
+import json
 import argparse
+import mss
 import moderngl
 import numpy as np
-from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QGuiApplication
-from PyQt5.QtWidgets import QOpenGLWidget, QApplication
-
-from editor.grid_utils import load_points, log, get_virtual_id
-from warp_engine import (
-    prepare_warp,
-    convert_maps_to_uv_texture_data,
-)
-
 from pathlib import Path
 
-def get_simulator_name_for_screen(screen, edit_display_name):
-    if screen.name() == edit_display_name:
-        raise RuntimeError("Edit display must not be used as warp target")
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QGuiApplication
+from PyQt5.QtWidgets import QApplication, QOpenGLWidget
 
-    screens = [
-        s for s in QGuiApplication.screens()
-        if s.name() != edit_display_name
-    ]
-    screens = sorted(screens, key=lambda s: s.geometry().x())
-    idx = screens.index(screen) + 1
-    return f"ScreenSimulatorSet_{idx}"
+from editor.grid_utils import get_virtual_id
 
-def load_warp_uv_texture(ctx, uv_path, w, h):
-    uv = np.load(uv_path).astype("f4")  # (H, W, 2)
-    assert uv.shape == (h, w, 2), f"UV shape mismatch: {uv.shape}"
-    return ctx.texture((w, h), 2, uv.tobytes(), dtype="f4")
 
-def create_identity_uv(ctx, w, h):
-    xs = np.linspace(0, 1, w, dtype=np.float32)
-    ys = np.linspace(0, 1, h, dtype=np.float32)
-    u, v = np.meshgrid(xs, ys)
-    uv = np.dstack([u, v]).astype("f4")
-    return ctx.texture((w, h), 2, uv.tobytes(), dtype="f4")
+# =========================================================
+# Profile Loader
+# =========================================================
+def load_profiles(virt_id, simulator_id, full_size):
+    base = Path("config")
 
+    # --- warp map (simulator 기준) ---
+    warp_npz = np.load(
+        base / "warp_cache" /
+        f"ScreenSimulatorSet_{simulator_id}_map_{full_size[0]}x{full_size[1]}.npz"
+    )
+
+    # --- perspective ---
+    with open(base / "projector_profiles" /
+              f"{virt_id}_perspective_points.json", encoding="utf-8") as f:
+        perspective = json.load(f)
+
+    # --- warp grid ---
+    with open(base / "projector_profiles" /
+              f"{virt_id}_warp_map_points.json", encoding="utf-8") as f:
+        warp_points = json.load(f)
+
+    return warp_npz, perspective, warp_points
+
+
+# =========================================================
+# OpenGL Window
+# =========================================================
 class GLDisplayWindow(QOpenGLWidget):
-    def __init__(self, source_screen, target_screen, mode,
-                 warp_info_all=None,
-                 source_geometry=None,
-                 edit_display_name=None):
+    def __init__(self, source_screen, target_screen,
+                 slice_geom, mode, profiles):
         super().__init__()
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
-        g = target_screen.geometry()
-        self.setFixedSize(g.width(), g.height())
-        self.move(g.x(), g.y())
+        tg = target_screen.geometry()
+        self.setFixedSize(tg.width(), tg.height())
+        self.move(tg.x(), tg.y())
 
-        self.source_geometry = source_geometry
-        self.warp_info_all = warp_info_all
+        self.slice = slice_geom
+        self.mode = mode
+        self.enable_blend = slice_geom["count"] > 1
 
-        self.slice_index = source_geometry.get("index", 0)
-        self.slice_count = source_geometry.get("count", 1)
-        self.overlap_px = source_geometry.get("overlap", 0)
-
-        self.enable_blend = self.slice_count > 1
+        self.full_w = source_screen.geometry().width()
+        self.full_h = source_screen.geometry().height()
 
         self.sct = mss.mss()
         self.monitor = {
-            "top": source_geometry["y"],
-            "left": source_geometry["x"],
-            "width": source_geometry["w"],
-            "height": source_geometry["h"],
+            "top": slice_geom["y"],
+            "left": slice_geom["x"],
+            "width": slice_geom["w"],
+            "height": slice_geom["h"],
         }
 
-        self.timer = QTimer()
+        self.warp_npz, self.perspective_pts, self.warp_pts = profiles
+
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
         self.timer.start(16)
 
-        self.edit_display_name = edit_display_name
-        self.target_screen = target_screen
-
+    # -----------------------------------------------------
     def initializeGL(self):
-        print("[INIT] OpenGL initialization start")
-        print("[INIT] Warp map loading start")
-        print("[INIT] Ready")
-
         self.ctx = moderngl.create_context()
-
-        # ===== フルスクリーンクアッド =====
-        vertices = np.array([
-            -1.0, -1.0, 0.0, 1.0,
-             1.0, -1.0, 1.0, 1.0,
-            -1.0,  1.0, 0.0, 0.0,
-             1.0,  1.0, 1.0, 0.0,
-        ], dtype='f4')
 
         if self.enable_blend:
             self.ctx.enable(moderngl.BLEND)
@@ -101,49 +85,57 @@ class GLDisplayWindow(QOpenGLWidget):
                 moderngl.ONE_MINUS_SRC_ALPHA,
             )
 
+        # ===== Fullscreen quad =====
+        vertices = np.array([
+            -1, -1, 0, 0,
+             1, -1, 1, 0,
+            -1,  1, 0, 1,
+             1,  1, 1, 1,
+        ], dtype="f4")
+
         self.prog = self.ctx.program(
             vertex_shader="""
                 #version 330
-                in vec2 in_vert;
-                in vec2 in_text;
+                layout (location=0) in vec2 in_pos;
+                layout (location=1) in vec2 in_uv;
                 out vec2 v_uv;
                 void main() {
-                    gl_Position = vec4(in_vert, 0.0, 1.0);
-                    v_uv = in_text;
+                    gl_Position = vec4(in_pos,0,1);
+                    v_uv = in_uv;
                 }
             """,
             fragment_shader="""
                 #version 330
-                uniform sampler2D original_tex;
-                uniform sampler2D warp_uv_tex;
-
-                uniform float slice_left;
-                uniform float slice_right;
-                uniform int enable_blend;
-
                 in vec2 v_uv;
                 out vec4 fragColor;
 
-                void main() {
-                    vec2 warped_uv = texture(warp_uv_tex, v_uv).rg;
+                uniform sampler2D video_tex;
+                uniform sampler2D warp_tex;
 
-                    // 範囲外は完全透明
-                    if (warped_uv.x < 0.0 || warped_uv.x > 1.0 ||
-                        warped_uv.y < 0.0 || warped_uv.y > 1.0) {
-                        fragColor = vec4(0.0);
-                        return;
+                uniform int mode; // 0=perspective, 1=warp
+                uniform float left_fade;
+                uniform float right_fade;
+                uniform int enable_blend;
+
+                void main() {
+                    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+
+                    if (mode == 1) {
+                        uv = texture(warp_tex, v_uv).rg;
+                        if (uv.x < 0 || uv.x > 1 ||
+                            uv.y < 0 || uv.y > 1)
+                            discard;
                     }
 
-                    vec4 color = texture(original_tex, warped_uv);
+                    vec4 color = texture(video_tex, uv);
 
                     if (enable_blend == 1) {
-                        float alpha = 1.0;
-                        if (warped_uv.x < slice_left) {
-                            alpha = smoothstep(0.0, slice_left, warped_uv.x);
-                        } else if (warped_uv.x > slice_right) {
-                            alpha = smoothstep(1.0, slice_right, warped_uv.x);
-                        }
-                        color.a *= alpha;
+                        float a = 1.0;
+                        if (v_uv.x < left_fade)
+                            a = v_uv.x / left_fade;
+                        else if (v_uv.x > right_fade)
+                            a = (1.0 - v_uv.x) / (1.0 - right_fade);
+                        color.a *= clamp(a,0,1);
                     }
 
                     fragColor = color;
@@ -153,134 +145,99 @@ class GLDisplayWindow(QOpenGLWidget):
 
         self.vbo = self.ctx.buffer(vertices.tobytes())
         self.vao = self.ctx.vertex_array(
-            self.prog,
-            [(self.vbo, '2f 2f', 'in_vert', 'in_text')]
+            self.prog, [(self.vbo, "2f 2f", 0, 1)]
         )
 
-        # ===== キャプチャテクスチャ =====
-        w = self.monitor["width"]
-        h = self.monitor["height"]
-        self.texture_video = self.ctx.texture((w, h), 4)
-        self.texture_video.swizzle = "BGRA"
+        # ===== video texture (slice size) =====
+        self.video_tex = self.ctx.texture(
+            (self.slice["w"], self.slice["h"]), 4
+        )
+        self.video_tex.swizzle = "BGRA"
 
-        # ===== Warp UV テクスチャ =====
-        simulator_name = get_simulator_name_for_screen(
-            self.target_screen,
-            self.edit_display_name
+        # ===== warp texture (full resolution) =====
+        map_x = self.warp_npz["map_x"]
+        map_y = self.warp_npz["map_y"]
+
+        uv = np.dstack([
+            map_x / self.full_w,
+            map_y / self.full_h
+        ]).astype("f4")
+
+        self.warp_tex = self.ctx.texture(
+            (self.full_w, self.full_h), 2, uv.tobytes(), dtype="f4"
         )
 
-        map_pair = prepare_warp(
-            display_name=simulator_name,
-            mode="map",
-            src_size=(w, h),
-            log_func=log,
-        )
-        print(
-            f"[WARP] using {simulator_name}_map_{w}x{h}.npz"
-        )
+        # ===== uniforms =====
+        overlap = self.slice["overlap"]
+        w = self.slice["w"]
 
-        if map_pair is None:
-            raise RuntimeError(
-                "Warp map missing. Please run precompute_warp_maps.py first."
-            )
-
-        map_x, map_y = map_pair
-        uv_bytes = convert_maps_to_uv_texture_data(map_x, map_y, w, h)
-        self.texture_warp = self.ctx.texture(
-            (w, h), 2, uv_bytes, dtype="f4"
-        )
-
-        print(f"[INFO] warp map applied: {simulator_name}")
-
-        self.prog["original_tex"].value = 0
-        self.prog["warp_uv_tex"].value = 1
-
-        slice_w = 1.0 / self.slice_count
-        overlap = self.overlap_px / w
-
-        left = self.slice_index * slice_w
-        right = (self.slice_index + 1) * slice_w
-        self.prog["slice_left"].value = left + overlap
-        self.prog["slice_right"].value = right - overlap
+        self.prog["left_fade"].value = overlap / w
+        self.prog["right_fade"].value = 1.0 - overlap / w
         self.prog["enable_blend"].value = 1 if self.enable_blend else 0
+        self.prog["mode"].value = 0 if self.mode == "perspective" else 1
 
+    # -----------------------------------------------------
     def paintGL(self):
-        dpr = self.devicePixelRatioF()
-        self.ctx.viewport = (
-            0, 0,
-            int(self.width() * dpr),
-            int(self.height() * dpr),
-        )
-
         img = self.sct.grab(self.monitor)
-        self.texture_video.write(img.raw)
+        self.video_tex.write(img.raw)
 
-        self.texture_video.use(0)
-        self.texture_warp.use(1)
+        # ---- grid viewport ----
+        cols = self.slice["count"]
+        idx = self.slice["index"]
+        gw = self.width() // cols
+        self.ctx.viewport = (idx * gw, 0, gw, self.height())
+
+        self.video_tex.use(0)
+        self.warp_tex.use(1)
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
-# ----------------------------------------------------------------------
-# main
-# ----------------------------------------------------------------------
-def main():
-    print("[BOOT] media_player_multi starting")
 
+# =========================================================
+# main
+# =========================================================
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
     parser.add_argument("--targets", nargs="+", required=True)
-    parser.add_argument("--mode", required=True)
-    parser.add_argument("--blend", action="store_true")
+    parser.add_argument("--mode", required=True,
+                        choices=["perspective", "map"])
     args = parser.parse_args()
 
-    print("[BOOT] args:", args)
-
     app = QApplication(sys.argv)
-
     screens = QGuiApplication.screens()
-    print("[BOOT] detected screens:")
-    for s in screens:
-        g = s.geometry()
-        print(f"  - {s.name()} {g.width()}x{g.height()} ({g.x()},{g.y()})")
 
-    # source screen
-    source_screen = next(
-        s for s in screens if s.name() == args.source
-    )
+    src = next(s for s in screens if s.name() == args.source)
+    geom = src.geometry()
 
+    slice_w = geom.width() // len(args.targets)
     windows = []
 
-    for idx, target_virt in enumerate(args.targets):
-        target_screen = next(
-            s for s in screens if get_virtual_id(s.name()) == target_virt
+    # 左→右順で simulator_id を割り当て
+    for sim_idx, virt in enumerate(args.targets):
+        tgt = next(s for s in screens if get_virtual_id(s.name()) == virt)
+
+        profiles = load_profiles(
+            virt_id=virt,
+            simulator_id=sim_idx + 1,
+            full_size=(geom.width(), geom.height())
         )
 
-        geom = source_screen.geometry()
-        source_geometry = {
-            "x": geom.x(),
+        sg = {
+            "x": geom.x() + sim_idx * slice_w,
             "y": geom.y(),
-            "w": geom.width(),
+            "w": slice_w,
             "h": geom.height(),
-            "index": idx,
+            "index": sim_idx,
             "count": len(args.targets),
-            "overlap": 0,
+            "overlap": 100,
         }
 
-        print(
-            f"[BOOT] creating window for {target_screen.name()} "
-            f"(slice {idx+1}/{len(args.targets)})"
-        )
-
         win = GLDisplayWindow(
-            source_screen=source_screen,
-            target_screen=target_screen,
-            mode=args.mode,
-            source_geometry=source_geometry,
-            edit_display_name=args.source,
+            src, tgt, sg, args.mode, profiles
         )
         win.show()
         windows.append(win)
 
-    print("[BOOT] entering Qt event loop")
     sys.exit(app.exec_())
 
 

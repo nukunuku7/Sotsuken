@@ -1,7 +1,8 @@
 # main.py (final)
-import sys
 import os
+import sys
 import json
+import platform
 import subprocess
 from pathlib import Path
 from PyQt5.QtCore import Qt
@@ -338,16 +339,34 @@ class MainWindow(QMainWindow):
         print("[DEBUG] cmd:", cmd)
         subprocess.Popen(cmd)
 
-def is_gpu_available_main():
+def detect_nvidia_gpu():
     try:
-        import cupy as cp
-        cnt = cp.cuda.runtime.getDeviceCount()
-        if cnt <= 0:
-            return False
-        _ = cp.array([1], dtype=cp.int32) * 2
-        return True
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        gpus = [line.strip() for line in out.splitlines() if line.strip()]
+        return gpus
     except Exception:
-        return False
+        return []
+
+
+def detect_gpus_windows():
+    try:
+        out = subprocess.check_output(
+            ["wmic", "path", "win32_VideoController", "get", "name"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        gpus = [
+            line.strip() for line in out.splitlines()
+            if line.strip() and line.strip().lower() != "name"
+        ]
+        return gpus
+    except Exception:
+        return []
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
@@ -357,6 +376,19 @@ if __name__ == "__main__":
         g = s.geometry()
         print(f"[{i}] {s.name()} : {g.width()}x{g.height()} at ({g.x()},{g.y()})")
     print("========================")
+
+    # NVIDIA CUDA GPU があるか
+    nvidia = detect_nvidia_gpu()
+    if nvidia:
+        print("[GPU] NVIDIA detected:", nvidia)
+
+    # その他の GPU（Intel / AMD 等）
+    gpus = detect_gpus_windows()
+    if gpus:
+        print("[GPU] detected (non-CUDA):", gpus)
+
+    print("[GPU] not detected")
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())

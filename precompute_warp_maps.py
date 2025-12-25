@@ -1,145 +1,107 @@
-# precompute_warp_maps.py
-import os
+# precompute_warp_maps.py (FINAL + progress debug)
+
 import time
 import numpy as np
 from pathlib import Path
 from scipy.interpolate import Rbf
 
-BASE_DIR = Path(__file__).resolve().parent
 from config.environment_config import environment_config
 
-WARP_CACHE_DIR = BASE_DIR / "config" / "warp_cache"
-WARP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+CACHE_DIR = BASE_DIR / "config" / "warp_cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# =========================================================
-# Math helpers
-# =========================================================
-def normalize(v):
-    v = np.asarray(v, np.float64)
-    n = np.linalg.norm(v)
-    return v if n == 0 else v / n
 
 def fit_plane(points):
     pts = np.asarray(points, np.float64)
-    centroid = pts.mean(axis=0)
-    cov = np.cov((pts - centroid).T)
-    _, eigvecs = np.linalg.eigh(cov)
-    u = normalize(eigvecs[:, 2])
-    v = normalize(eigvecs[:, 1])
-    return centroid, u, v
+    c = pts.mean(axis=0)
+    _, _, vh = np.linalg.svd(pts - c)
+    u, v = vh[0], vh[1]
+    return c, u / np.linalg.norm(u), v / np.linalg.norm(v)
 
-def build_ideal_rectangle_from_outline(dst_uv):
-    """
-    dst_uv : (N,2) 歪んだスクリーン外周 (0-1正規化)
-    return : (N,2) 理想矩形外周
-    """
-    # 外周の累積距離
-    diff = np.diff(np.vstack([dst_uv, dst_uv[0]]), axis=0)
-    seglen = np.linalg.norm(diff, axis=1)
-    s = np.insert(np.cumsum(seglen), 0, 0.0)
+
+def build_rectangle(dst):
+    diff = np.diff(np.vstack([dst, dst[0]]), axis=0)
+    s = np.insert(np.cumsum(np.linalg.norm(diff, axis=1)), 0, 0)
     s /= s[-1]
 
-    src = np.zeros_like(dst_uv)
-
+    src = np.zeros_like(dst)
     for i, t in enumerate(s[:-1]):
         if t < 0.25:
-            src[i] = [t * 4.0, 0.0]
-        elif t < 0.50:
-            src[i] = [1.0, (t - 0.25) * 4.0]
+            src[i] = [t * 4, 0]
+        elif t < 0.5:
+            src[i] = [1, (t - 0.25) * 4]
         elif t < 0.75:
-            src[i] = [1.0 - (t - 0.50) * 4.0, 1.0]
+            src[i] = [1 - (t - 0.5) * 4, 1]
         else:
-            src[i] = [0.0, 1.0 - (t - 0.75) * 4.0]
-
+            src[i] = [0, 1 - (t - 0.75) * 4]
     return src
 
-# =========================================================
-# Main
-# =========================================================
-def compute_all_maps(src_size):
-    w, h = src_size
+
+def compute_all_maps(size):
+    w, h = size
 
     for sim in environment_config["screen_simulation_sets"]:
         name = sim["name"]
-        print(f"\n[compute] {name}  map size={w}x{h}")
+        print(f"\n[START] Simulator: {name}")
 
-        screen_pts = np.asarray(sim["screen"]["vertices"], np.float64)
+        t0 = time.time()
+        pts = np.asarray(sim["screen"]["vertices"], np.float64)
 
-        # -------------------------------------------------
-        # 1. plane fitting
-        # -------------------------------------------------
-        sc_c, sc_u, sc_v = fit_plane(screen_pts)
+        # ---- Plane fitting
+        c, u, v = fit_plane(pts)
+        uv = np.stack([np.dot(pts - c, u), np.dot(pts - c, v)], axis=1)
 
-        # -------------------------------------------------
-        # 2. project 3D screen outline -> 2D
-        # -------------------------------------------------
-        uv = np.stack([
-            np.dot(screen_pts - sc_c, sc_u),
-            np.dot(screen_pts - sc_c, sc_v),
-        ], axis=1)
+        uv -= uv.min(axis=0)
+        uv /= uv.max(axis=0)
 
-        umin, vmin = uv.min(axis=0)
-        umax, vmax = uv.max(axis=0)
+        print("  - Build TPS interpolator ...")
+        src = build_rectangle(uv)
 
-        dst_uv = np.empty_like(uv)
-        dst_uv[:, 0] = (uv[:, 0] - umin) / (umax - umin)
-        dst_uv[:, 1] = (uv[:, 1] - vmin) / (vmax - vmin)
+        tps_u = Rbf(uv[:, 0], uv[:, 1], src[:, 0], function="thin_plate")
+        tps_v = Rbf(uv[:, 0], uv[:, 1], src[:, 1], function="thin_plate")
 
-        # -------------------------------------------------
-        # 3. build ideal rectangle (source side)
-        # -------------------------------------------------
-        src_uv = build_ideal_rectangle_from_outline(dst_uv)
+        print(f"  - Allocating warp maps: {w}x{h}")
+        map_x = np.full((h, w), -1, np.float32)
+        map_y = np.full((h, w), -1, np.float32)
 
-        # -------------------------------------------------
-        # 4. TPS : distorted(screen) -> ideal(source)
-        # -------------------------------------------------
-        print("[TPS] building thin plate spline...")
-        tps_u = Rbf(dst_uv[:, 0], dst_uv[:, 1],
-                    src_uv[:, 0], function="thin_plate")
-        tps_v = Rbf(dst_uv[:, 0], dst_uv[:, 1],
-                    src_uv[:, 1], function="thin_plate")
-
-        # -------------------------------------------------
-        # 5. build warp UV map
-        # -------------------------------------------------
-        map_uv = np.full((h, w, 2), -1.0, np.float32)
-
-        start = time.time()
+        print("  - Computing warp map rows...")
+        row_start = time.time()
+        last_print = 0
 
         for y in range(h):
-            v = y / (h - 1)
+            v0 = y / (h - 1)
 
             for x in range(w):
-                u = x / (w - 1)
+                u0 = x / (w - 1)
+                uu = float(tps_u(u0, v0))
+                vv = float(tps_v(u0, v0))
+                if 0 <= uu <= 1 and 0 <= vv <= 1:
+                    map_x[y, x] = uu
+                    map_y[y, x] = vv
 
-                uu = float(tps_u(u, v))
-                vv = float(tps_v(u, v))
+            # ---- progress output every ~10%
+            progress = y / (h - 1)
+            if progress - last_print >= 0.1 or y == 0 or y == h - 1:
+                elapsed = time.time() - row_start
+                eta = elapsed / max(progress, 1e-6) * (1.0 - progress)
+                print(
+                    f"    row {y:4d} / {h} "
+                    f"({progress*100:5.1f}%) "
+                    f"elapsed {elapsed:6.1f}s, ETA {eta:6.1f}s"
+                )
+                last_print = progress
 
-                if 0.0 <= uu <= 1.0 and 0.0 <= vv <= 1.0:
-                    map_uv[y, x, 0] = uu
-                    map_uv[y, x, 1] = vv
-
-            progress = (y + 1) / h
-            elapsed = time.time() - start
-            eta = elapsed / progress - elapsed if progress > 0 else 0
-
-            print(
-                f"[PROGRESS] {y+1:4d}/{h} "
-                f"({progress*100:5.1f}%) "
-                f"elapsed={elapsed:6.1f}s "
-                f"ETA={eta:6.1f}s"
-            )
-
-        path = WARP_CACHE_DIR / f"{name}_map_{w}x{h}.npz"
+        total = time.time() - t0
+        print(f"[DONE] Compute warp map: {total:.1f}s")
 
         np.savez(
-            path,
-            map_x=map_uv[..., 0].astype(np.float32),
-            map_y=map_uv[..., 1].astype(np.float32),
+            CACHE_DIR / f"{name}_map_{w}x{h}.npz",
+            map_x=map_x,
+            map_y=map_y
         )
+        print(f"[SAVE] {name}_map_{w}x{h}.npz")
 
-        print(f"[SAVE] {path}")
 
-# =========================================================
 if __name__ == "__main__":
     compute_all_maps((1920, 1080))

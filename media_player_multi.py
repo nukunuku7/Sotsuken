@@ -1,4 +1,4 @@
-# media_player_multi.py (FINAL)
+# media_player_multi.py (FIXED FINAL)
 
 import sys
 import json
@@ -64,7 +64,6 @@ class GLDisplayWindow(QOpenGLWidget):
 
         self.slice = slice_geom
         self.mode = mode
-        self.enable_blend = slice_geom["count"] > 1
 
         self.full_w = source_screen.geometry().width()
         self.full_h = source_screen.geometry().height()
@@ -79,26 +78,13 @@ class GLDisplayWindow(QOpenGLWidget):
 
         self.warp_npz, self.perspective_pts, self.warp_pts = profiles
 
-        # === grid points (normalized UV) ===
-        pts = self.perspective_pts if mode == "perspective" else self.warp_pts
-        pts[:, 0] /= self.full_w
-        pts[:, 1] /= self.full_h
-        self.grid_uv = pts
-
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
-        self.timer.start(16)  # ~60fps
+        self.timer.start(16)
 
     # -----------------------------------------------------
     def initializeGL(self):
         self.ctx = moderngl.create_context()
-
-        if self.enable_blend:
-            self.ctx.enable(moderngl.BLEND)
-            self.ctx.blend_func = (
-                moderngl.SRC_ALPHA,
-                moderngl.ONE_MINUS_SRC_ALPHA,
-            )
 
         vertices = np.array([
             -1, -1, 0, 0,
@@ -125,40 +111,34 @@ class GLDisplayWindow(QOpenGLWidget):
 
                 uniform sampler2D video_tex;
                 uniform sampler2D warp_tex;
-
-                uniform int mode;
                 uniform vec4 crop_rect;
-                uniform float left_fade;
-                uniform float right_fade;
-                uniform int enable_blend;
+                uniform int mode;
 
                 void main() {
-                    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+
+                    vec2 uv;
 
                     if (mode == 1) {
+                        // warp_map: map_x/map_y は video_tex 用UV
                         uv = texture(warp_tex, v_uv).rg;
-                        if (uv.x < 0.0 || uv.x > 1.0 ||
-                            uv.y < 0.0 || uv.y > 1.0)
-                            discard;
+                    } else {
+                        // perspective: そのまま
+                        uv = vec2(v_uv.x, 1.0 - v_uv.y);
                     }
 
+                    // ---- crop (共通)
                     if (uv.x < crop_rect.x || uv.x > crop_rect.z ||
                         uv.y < crop_rect.y || uv.y > crop_rect.w)
                         discard;
 
-                    vec4 color = texture(video_tex, uv);
+                    // ---- safety
+                    if (uv.x < 0.0 || uv.x > 1.0 ||
+                        uv.y < 0.0 || uv.y > 1.0)
+                        discard;
 
-                    if (enable_blend == 1) {
-                        float a = 1.0;
-                        if (v_uv.x < left_fade)
-                            a = v_uv.x / left_fade;
-                        else if (v_uv.x > right_fade)
-                            a = (1.0 - v_uv.x) / (1.0 - right_fade);
-                        color.a *= clamp(a, 0.0, 1.0);
-                    }
-
-                    fragColor = color;
+                    fragColor = vec4(uv, 0.0, 1.0);
                 }
+
             """
         )
 
@@ -167,49 +147,122 @@ class GLDisplayWindow(QOpenGLWidget):
             self.prog, [(self.vbo, "2f 2f", "in_pos", "in_uv")]
         )
 
+        # ---- video texture
         self.video_tex = self.ctx.texture(
             (self.full_w, self.full_h), 4
         )
         self.video_tex.swizzle = "BGRA"
 
-        uv = np.dstack([
-            self.warp_npz["map_x"],
-            self.warp_npz["map_y"]
-        ]).astype("f4")
+        # ---- warp texture (map mode only)
+        map_x = self.warp_npz["map_x"] / (self.full_w - 1)
+        map_y = self.warp_npz["map_y"] / (self.full_h - 1)
+
+        uv = np.dstack([map_x, map_y]).astype("f4")
 
         self.warp_tex = self.ctx.texture(
             (self.full_w, self.full_h), 2, uv.tobytes(), dtype="f4"
         )
 
-        u0, v0 = self.grid_uv.min(axis=0)
-        u1, v1 = self.grid_uv.max(axis=0)
+        # ---- grid → crop_rect
+        pts = self.perspective_pts if self.mode == "perspective" else self.warp_pts
+        pts = pts.copy()
+        pts[:, 0] /= self.full_w
+        pts[:, 1] /= self.full_h
+
+        sx0 = self.slice["x"] / self.full_w
+        sx1 = (self.slice["x"] + self.slice["w"]) / self.full_w
+
+        mask = (pts[:, 0] >= sx0) & (pts[:, 0] <= sx1)
+        pts = pts[mask]
+
+        if len(pts) >= 2:
+            u0, v0 = pts.min(axis=0)
+            u1, v1 = pts.max(axis=0)
+        else:
+            # フォールバック（絶対に真っ黒にしない）
+            u0, v0, u1, v1 = sx0, 0.0, sx1, 1.0
+
         self.prog["crop_rect"].value = (u0, v0, u1, v1)
-
-        overlap = self.slice["overlap"]
-        w = self.slice["w"]
-
-        self.prog["left_fade"].value = overlap / w
-        self.prog["right_fade"].value = 1.0 - overlap / w
-        self.prog["enable_blend"].value = 1 if self.enable_blend else 0
         self.prog["mode"].value = 0 if self.mode == "perspective" else 1
 
     # -----------------------------------------------------
     def paintGL(self):
         img = self.sct.grab(self.monitor)
         frame = np.array(img, dtype=np.uint8)
-
-        frame = cv2.resize(
-            frame, (self.full_w, self.full_h),
-            interpolation=cv2.INTER_LINEAR
-        )
+        frame = cv2.resize(frame, (self.full_w, self.full_h))
 
         self.video_tex.write(frame.tobytes())
-
-        cols = self.slice["count"]
-        idx = self.slice["index"]
-        gw = self.width() // cols
-        self.ctx.viewport = (idx * gw, 0, gw, self.height())
-
         self.video_tex.use(0)
-        self.warp_tex.use(1)
+        if self.mode == "map":
+            self.warp_tex.use(1)
+
         self.vao.render(moderngl.TRIANGLE_STRIP)
+
+
+# =========================================================
+# Main Entry Point
+# =========================================================
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--mode", required=True, choices=["perspective", "map"])
+    parser.add_argument("--targets", nargs="+", required=True)
+    args = parser.parse_args()
+
+    app = QApplication(sys.argv)
+
+    screens = QGuiApplication.screens()
+    screen_map = {s.name(): s for s in screens}
+
+    if args.source not in screen_map:
+        print("[ERROR] Source screen not found")
+        sys.exit(1)
+
+    source_screen = screen_map[args.source]
+    full_w = source_screen.geometry().width()
+    full_h = source_screen.geometry().height()
+
+    windows = []
+
+    for idx, tgt in enumerate(args.targets):
+        if tgt not in screen_map:
+            print(f"[WARN] Target screen not found: {tgt}")
+            continue
+
+        virt_id = get_virtual_id(tgt)
+
+        profiles = load_profiles(
+            virt_id=virt_id,
+            simulator_index=idx + 1,
+            full_size=(full_w, full_h),
+        )
+
+        slice_geom = {
+            "index": idx,
+            "count": len(args.targets),
+            "x": int(idx * full_w / len(args.targets)),
+            "y": 0,
+            "w": int(full_w / len(args.targets)),
+            "h": full_h,
+        }
+
+        win = GLDisplayWindow(
+            source_screen,
+            screen_map[tgt],
+            slice_geom,
+            args.mode,
+            profiles,
+        )
+        win.show()
+        windows.append(win)
+
+    if not windows:
+        print("[ERROR] No windows created")
+        sys.exit(1)
+
+    print(f"[OK] Launched {len(windows)} windows")
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

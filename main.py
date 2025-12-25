@@ -2,7 +2,6 @@
 import os
 import sys
 import json
-import platform
 import subprocess
 from pathlib import Path
 from PyQt5.QtCore import Qt

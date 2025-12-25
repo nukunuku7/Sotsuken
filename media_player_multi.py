@@ -4,6 +4,7 @@ import argparse
 import mss
 import moderngl
 import numpy as np
+import cv2
 from pathlib import Path
 
 from PyQt5.QtCore import QTimer, Qt
@@ -16,23 +17,29 @@ from editor.grid_utils import get_virtual_id
 # =========================================================
 # Profile Loader
 # =========================================================
-def load_profiles(virt_id, simulator_id, full_size):
+def load_profiles(virt_id, simulator_index, full_size):
     base = Path("config")
 
-    # --- warp map (simulator 기준) ---
+    # --- warp map : ScreenSimulatorSet_1,2,3... を順に使用 ---
     warp_npz = np.load(
         base / "warp_cache" /
-        f"ScreenSimulatorSet_{simulator_id}_map_{full_size[0]}x{full_size[1]}.npz"
+        f"ScreenSimulatorSet_{simulator_index}_map_{full_size[0]}x{full_size[1]}.npz"
     )
 
-    # --- perspective ---
-    with open(base / "projector_profiles" /
-              f"{virt_id}_perspective_points.json", encoding="utf-8") as f:
+    # --- perspective grid ---
+    with open(
+        base / "projector_profiles" /
+        f"{virt_id}_perspective_points.json",
+        encoding="utf-8"
+    ) as f:
         perspective = json.load(f)
 
     # --- warp grid ---
-    with open(base / "projector_profiles" /
-              f"{virt_id}_warp_map_points.json", encoding="utf-8") as f:
+    with open(
+        base / "projector_profiles" /
+        f"{virt_id}_warp_map_points.json",
+        encoding="utf-8"
+    ) as f:
         warp_points = json.load(f)
 
     return warp_npz, perspective, warp_points
@@ -117,29 +124,62 @@ class GLDisplayWindow(QOpenGLWidget):
                 uniform float right_fade;
                 uniform int enable_blend;
 
+                /*
+                crop_rect:
+                x = u_min
+                y = v_min
+                z = u_max
+                w = v_max
+                (all normalized 0-1, video_tex space)
+                */
+                uniform vec4 crop_rect;
+
                 void main() {
+
+                    // ---------------------------------
+                    // 1. base uv (video texture space)
+                    // ---------------------------------
                     vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
 
+                    // ---------------------------------
+                    // 2. warp map (if enabled)
+                    // ---------------------------------
                     if (mode == 1) {
                         uv = texture(warp_tex, v_uv).rg;
-                        if (uv.x < 0 || uv.x > 1 ||
-                            uv.y < 0 || uv.y > 1)
+
+                        // warp map 外は描画しない
+                        if (uv.x < 0.0 || uv.x > 1.0 ||
+                            uv.y < 0.0 || uv.y > 1.0)
                             discard;
                     }
 
+                    // ---------------------------------
+                    // 3. crop (grid output area)
+                    // ---------------------------------
+                    if (uv.x < crop_rect.x || uv.x > crop_rect.z ||
+                        uv.y < crop_rect.y || uv.y > crop_rect.w)
+                        discard;
+
+                    // ---------------------------------
+                    // 4. sample video
+                    // ---------------------------------
                     vec4 color = texture(video_tex, uv);
 
+                    // ---------------------------------
+                    // 5. edge blend (overlap)
+                    // ---------------------------------
                     if (enable_blend == 1) {
                         float a = 1.0;
                         if (v_uv.x < left_fade)
                             a = v_uv.x / left_fade;
                         else if (v_uv.x > right_fade)
                             a = (1.0 - v_uv.x) / (1.0 - right_fade);
-                        color.a *= clamp(a,0,1);
+                        color.a *= clamp(a, 0.0, 1.0);
                     }
 
                     fragColor = color;
                 }
+
             """
         )
 
@@ -148,26 +188,39 @@ class GLDisplayWindow(QOpenGLWidget):
             self.prog, [(self.vbo, "2f 2f", 0, 1)]
         )
 
-        # ===== video texture (slice size) =====
+        # ===== video texture (FULL resolution) =====
         self.video_tex = self.ctx.texture(
-            (self.slice["w"], self.slice["h"]), 4
+            (self.full_w, self.full_h), 4
         )
         self.video_tex.swizzle = "BGRA"
 
-        # ===== warp texture (full resolution) =====
+        # ===== warp texture (FULL resolution / UV already normalized) =====
         map_x = self.warp_npz["map_x"]
         map_y = self.warp_npz["map_y"]
 
-        uv = np.dstack([
-            map_x / self.full_w,
-            map_y / self.full_h
-        ]).astype("f4")
+        uv = np.dstack([map_x, map_y]).astype("f4")
 
         self.warp_tex = self.ctx.texture(
             (self.full_w, self.full_h), 2, uv.tobytes(), dtype="f4"
         )
 
         # ===== uniforms =====
+        # grid_points: shape = (N, 2), UV 正規化済み前提
+        # 例: [(u, v), (u, v), ...]
+
+        pts = self.grid_points   # ← あなたの実データ名に置換
+
+        u_vals = pts[:, 0]
+        v_vals = pts[:, 1]
+
+        u0 = float(u_vals.min())
+        u1 = float(u_vals.max())
+        v0 = float(v_vals.min())
+        v1 = float(v_vals.max())
+
+        self.prog["crop_rect"].value = (u0, v0, u1, v1)
+        print("crop_rect =", u0, v0, u1, v1)
+
         overlap = self.slice["overlap"]
         w = self.slice["w"]
 
@@ -179,9 +232,18 @@ class GLDisplayWindow(QOpenGLWidget):
     # -----------------------------------------------------
     def paintGL(self):
         img = self.sct.grab(self.monitor)
-        self.video_tex.write(img.raw)
+        frame = np.array(img, dtype=np.uint8)
 
-        # ---- grid viewport ----
+        # 短冊 → FHD に引き伸ばし
+        frame = cv2.resize(
+            frame,
+            (self.full_w, self.full_h),
+            interpolation=cv2.INTER_LINEAR
+        )
+
+        self.video_tex.write(frame.tobytes())
+
+        # ---- viewport (短冊分割) ----
         cols = self.slice["count"]
         idx = self.slice["index"]
         gw = self.width() // cols
@@ -212,24 +274,24 @@ def main():
     slice_w = geom.width() // len(args.targets)
     windows = []
 
-    # 左→右順で simulator_id を割り当て
-    for sim_idx, virt in enumerate(args.targets):
+    # 左→右順 = ScreenSimulatorSet_1,2,3...
+    for idx, virt in enumerate(args.targets):
         tgt = next(s for s in screens if get_virtual_id(s.name()) == virt)
 
         profiles = load_profiles(
             virt_id=virt,
-            simulator_id=sim_idx + 1,
+            simulator_index=idx + 1,
             full_size=(geom.width(), geom.height())
         )
 
         sg = {
-            "x": geom.x() + sim_idx * slice_w,
+            "x": geom.x() + idx * slice_w,
             "y": geom.y(),
             "w": slice_w,
             "h": geom.height(),
-            "index": sim_idx,
+            "index": idx,
             "count": len(args.targets),
-            "overlap": 100,
+            "overlap": int(slice_w * 0.1),
         }
 
         win = GLDisplayWindow(

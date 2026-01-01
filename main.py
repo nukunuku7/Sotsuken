@@ -35,6 +35,15 @@ def load_edit_profile():
             return json.load(f).get("display")
     return None
 
+def get_simulator_name_for_screen(screen, edit_display_name):
+    screens = [
+        s for s in QGuiApplication.screens()
+        if s.name() != edit_display_name
+    ]
+    screens = sorted(screens, key=lambda s: s.geometry().x())
+    idx = screens.index(screen) + 1
+    return f"ScreenSimulatorSet_{idx}"
+
 def get_display_mapping():
     screens = QGuiApplication.screens()
     ordered = sorted(screens, key=lambda s: s.geometry().x())
@@ -80,7 +89,23 @@ class MainWindow(QMainWindow):
         self.init_display_info()
         self.init_projector_list()
 
+    def has_precomputed_warp(self, display_name, screen):
+        simulator = get_simulator_name_for_screen(screen, self.edit_display_name)
+        w = screen.geometry().width()
+        h = screen.geometry().height()
+        path = CONFIG_DIR / "warp_cache" / f"{simulator}_map_{w}x{h}.npz"
+        return path.exists()
+
     def init_display_info(self):
+        saved = load_edit_profile()
+
+        # ① 保存済み設定があればそれを使う
+        if saved:
+            self.edit_display_name = saved
+            self.label.setText(f"編集用ディスプレイ：{self.edit_display_name}")
+            return
+
+        # ② なければ初回のみ primary を使って保存
         screen = QGuiApplication.primaryScreen()
         if screen:
             self.edit_display_name = screen.name()
@@ -251,41 +276,96 @@ class MainWindow(QMainWindow):
         )
 
     def launch_correction_display(self):
-        selected_names = []
+        print("[DEBUG] launch_correction_display called")
+
+        # チェックされたディスプレイ（PyQt名）を取得
+        selected_screens = []
         for i in range(self.projector_list.count()):
             item = self.projector_list.item(i)
             if item.checkState() == Qt.Checked:
-                selected_names.append(item.data(Qt.UserRole))
+                selected_screens.append(item.data(Qt.UserRole))
 
-        if not selected_names:
-            QMessageBox.warning(self, "警告", "出力先ディスプレイが選択されていません")
+        print("[DEBUG] selected:", selected_screens)
+
+        if not selected_screens:
+            print("[ERROR] no display selected")
             return
 
-        mode = self.mode_selector.currentText()
+        # 左→右順に並び替え
+        screens_with_x = []
+        for screen in QGuiApplication.screens():
+            if screen.name() in selected_screens:
+                screens_with_x.append((screen, screen.geometry().x()))
+
+        screens_with_x.sort(key=lambda t: t[1])
+        ordered_screens = [s for s, _ in screens_with_x]
+
+        # warp map の存在チェック
+        for screen in ordered_screens:
+            simulator = get_simulator_name_for_screen(screen, self.edit_display_name)
+            w, h = screen.geometry().width(), screen.geometry().height()
+            path = CONFIG_DIR / "warp_cache" / f"{simulator}_map_{w}x{h}.npz"
+            print(f"[DEBUG] checking warp: {path}")
+
+            if not path.exists():
+                print("[ERROR] warp map missing!")
+                return
+
+        # ===== media_player_multi 起動 =====
+        print("[DEBUG] launching media_player_multi")
+
+        script_path = str(BASE_DIR / "media_player_multi.py")
+
         source_display = self.edit_display_name
-        targets = [get_virtual_id(n) for n in selected_names]
+
+        # virtual id を左→右順で生成
+        target_display_names = [
+            screen.name()
+            for screen in ordered_screens
+        ]
+
+        mode_ui = self.mode_selector.currentText()
+        mode = "map" if mode_ui == "warp_map" else "perspective"
 
         cmd = [
             sys.executable,
-            str(BASE_DIR / "media_player_multi.py"),
+            script_path,
             "--source", source_display,
-            "--targets", *targets,
             "--mode", mode,
+            "--targets", *target_display_names,
         ]
-        if len(selected_names) > 1:
-            cmd.append("--blend")
+
+        print("[DEBUG] cmd:", cmd)
         subprocess.Popen(cmd)
 
-def is_gpu_available_main():
+def detect_nvidia_gpu():
     try:
-        import cupy as cp
-        cnt = cp.cuda.runtime.getDeviceCount()
-        if cnt <= 0:
-            return False
-        _ = cp.array([1], dtype=cp.int32) * 2
-        return True
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        gpus = [line.strip() for line in out.splitlines() if line.strip()]
+        return gpus
     except Exception:
-        return False
+        return []
+
+
+def detect_gpus_windows():
+    try:
+        out = subprocess.check_output(
+            ["wmic", "path", "win32_VideoController", "get", "name"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        gpus = [
+            line.strip() for line in out.splitlines()
+            if line.strip() and line.strip().lower() != "name"
+        ]
+        return gpus
+    except Exception:
+        return []
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
@@ -295,6 +375,20 @@ if __name__ == "__main__":
         g = s.geometry()
         print(f"[{i}] {s.name()} : {g.width()}x{g.height()} at ({g.x()},{g.y()})")
     print("========================")
+
+    # NVIDIA CUDA GPU があるか
+    nvidia = detect_nvidia_gpu()
+    if nvidia:
+        print("[GPU] NVIDIA detected:", nvidia)
+
+    # その他の GPU（Intel / AMD 等）
+    gpus = detect_gpus_windows()
+    if gpus:
+        print("[GPU] detected (non-CUDA):", gpus)
+
+    print("[GPU] not detected")
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
+    

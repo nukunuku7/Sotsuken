@@ -1,150 +1,119 @@
 # warp_engine.py
 # ------------------------------------------------------------
-# Warp Engine (Runtime Only / Safe Version)
+# Warp Engine (Grid-based / Runtime Safe Version)
 #
-# ・Blender による事前計算済み warp map (.npz) を「読むだけ」
-# ・Runtime では一切の物理計算・crop・補間生成を行わない
-# ・事前計算ファイルが無ければ、明示的にエラーを出して停止
+# ・grid_editor_* で保存された制御点(JSON)を読む
+# ・perspective / warp_map の2方式をサポート
+# ・precompute / npz / 物理計算は一切行わない
 # ------------------------------------------------------------
 
-import os
-import sys
 import numpy as np
 import cv2
+from editor.grid_utils import load_points, log
 
-# ----------------------------------------------------------------------
-# Warp cache directory
-# ----------------------------------------------------------------------
-WARP_CACHE_DIR = os.path.join("config", "warp_cache")
-os.makedirs(WARP_CACHE_DIR, exist_ok=True)
+# ------------------------------------------------------------
+# Perspective warp
+# ------------------------------------------------------------
+def _build_perspective_map(points, width, height):
+    """
+    points: list of 4 points (normalized or pixel)
+    """
+    if len(points) != 4:
+        raise ValueError("Perspective mode requires exactly 4 points")
 
-# ----------------------------------------------------------------------
-# In-memory cache
-# ----------------------------------------------------------------------
-warp_cache = {}
+    src = np.array([
+        [0, 0],
+        [width, 0],
+        [width, height],
+        [0, height],
+    ], dtype=np.float32)
 
-# ----------------------------------------------------------------------
-# Logging
-# ----------------------------------------------------------------------
-def _log(msg, log_func=None):
-    if log_func:
-        try:
-            log_func(msg)
-        except Exception:
-            print(msg)
-    else:
-        print(msg)
+    dst = np.array(points, dtype=np.float32)
 
-# ----------------------------------------------------------------------
-# Utility
-# ----------------------------------------------------------------------
-def _sanitize(name: str) -> str:
-    return (
-        name.replace("(", "_")
-            .replace(")", "_")
-            .replace(" ", "_")
-            .replace("-", "_")
-            .replace("/", "_")
+    M = cv2.getPerspectiveTransform(src, dst)
+
+    map_x, map_y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
     )
 
-def _warp_cache_path(display_name, src_size):
-    w, h = src_size
-    return os.path.join(
-        WARP_CACHE_DIR,
-        f"{display_name}_map_{w}x{h}.npz"
+    coords = np.stack([map_x, map_y, np.ones_like(map_x)], axis=-1)
+    warped = coords @ M.T
+    warped /= warped[..., 2:3]
+
+    return warped[..., 0], warped[..., 1]
+
+# ------------------------------------------------------------
+# Grid warp
+# ------------------------------------------------------------
+def _build_grid_map(points, width, height, grid_size=6):
+    """
+    points: list of grid points (row-major)
+    """
+    if len(points) != grid_size * grid_size:
+        raise ValueError("Warp map grid size mismatch")
+
+    points = np.array(points, dtype=np.float32).reshape(
+        (grid_size, grid_size, 2)
     )
 
-# ----------------------------------------------------------------------
-# prepare_warp (Runtime Only)
-# ----------------------------------------------------------------------
+    src_x = np.linspace(0, width, grid_size, dtype=np.float32)
+    src_y = np.linspace(0, height, grid_size, dtype=np.float32)
+    src = np.stack(np.meshgrid(src_x, src_y), axis=-1)
+
+    map_x = cv2.resize(
+        points[..., 0],
+        (width, height),
+        interpolation=cv2.INTER_CUBIC,
+    )
+    map_y = cv2.resize(
+        points[..., 1],
+        (width, height),
+        interpolation=cv2.INTER_CUBIC,
+    )
+
+    return map_x, map_y
+
+# ------------------------------------------------------------
+# prepare_warp (main entry)
+# ------------------------------------------------------------
 def prepare_warp(
     display_name,
     mode,
     src_size,
-    load_points_func=None,  # 互換性のため残す（使用しない）
     log_func=None,
 ):
     """
-    Runtime では mode="map" のみを許可する。
-    それ以外は設計ミスとして即エラー。
+    Returns:
+        map_x, map_y (float32 pixel coordinate maps)
     """
 
-    # ==========================================================
-    # mode チェック（事故防止）
-    # ==========================================================
-    if mode != "map":
-        _log(
-            "[warp] FATAL: runtime supports only mode='map'\n"
-            f"        requested mode = '{mode}'\n"
-            "        Please fix caller logic.",
-            log_func,
-        )
-        raise RuntimeError("Invalid warp mode at runtime")
+    width, height = src_size
+    points = load_points(display_name, mode)
 
-    display_name = _sanitize(display_name)
-    cache_key = (display_name, src_size)
+    if points is None:
+        log(f"[warp] no grid data for {display_name}", log_func)
+        return None
 
-    # ==========================================================
-    # ① メモリキャッシュ
-    # ==========================================================
-    if cache_key in warp_cache:
-        return warp_cache[cache_key]
+    log(f"[warp] building warp ({mode}) for {display_name}", log_func)
 
-    # ==========================================================
-    # ② ファイルキャッシュ（必須）
-    # ==========================================================
-    cache_path = _warp_cache_path(display_name, src_size)
+    if mode == "perspective":
+        map_x, map_y = _build_perspective_map(points, width, height)
 
-    if not os.path.exists(cache_path):
-        _log(
-            "[warp] FATAL: precomputed warp map not found\n"
-            f"        expected file:\n"
-            f"        {cache_path}\n\n"
-            "        Please run:\n"
-            "          python precompute_warp_maps.py\n"
-            "        before starting the media player.",
-            log_func,
-        )
-        # 強制停止（半端に続行させない）
-        raise FileNotFoundError(cache_path)
+    elif mode == "map":
+        map_x, map_y = _build_grid_map(points, width, height)
 
-    # ==========================================================
-    # ③ 読み込み
-    # ==========================================================
-    _log(f"[warp] load precomputed map: {cache_path}", log_func)
+    else:
+        raise RuntimeError(f"Unsupported warp mode: {mode}")
 
-    data = np.load(cache_path)
-    map_x = data["map_x"].astype(np.float32)
-    map_y = data["map_y"].astype(np.float32)
+    return map_x.astype(np.float32), map_y.astype(np.float32)
 
-    warp_cache[cache_key] = (map_x, map_y)
-    return map_x, map_y
-
-# ----------------------------------------------------------------------
-# warp_image (CPU, optional utility)
-# ----------------------------------------------------------------------
-def warp_image(image, map_x, map_y):
-    """
-    CPU 用 warp（デバッグ・検証用）
-    Runtime 表示では GPU 側 UV warp を使用する想定
-    """
-    return cv2.remap(
-        image,
-        map_x,
-        map_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-
-# ----------------------------------------------------------------------
-# UV map for ModernGL (pixel -> normalized UV)
-# ----------------------------------------------------------------------
+# ------------------------------------------------------------
+# GPU helper
+# ------------------------------------------------------------
 def convert_maps_to_uv_texture_data(map_x, map_y, width, height):
     """
-    map_x, map_y : pixel coordinate maps (float32)
-    width, height: source image size
-    return        : bytes for GL_RG32F texture (u, v in 0–1)
+    Pixel map → normalized UV (0–1)
     """
     u = map_x / float(width)
     v = map_y / float(height)

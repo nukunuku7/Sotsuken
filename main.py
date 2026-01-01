@@ -1,6 +1,6 @@
 # main.py (final)
-import os
 import sys
+import os
 import json
 import subprocess
 from pathlib import Path
@@ -319,8 +319,8 @@ class MainWindow(QMainWindow):
         source_display = self.edit_display_name
 
         # virtual id を左→右順で生成
-        target_virtual_ids = [
-            get_virtual_id(screen.name())
+        target_display_names = [
+            screen.name()
             for screen in ordered_screens
         ]
 
@@ -332,7 +332,7 @@ class MainWindow(QMainWindow):
             script_path,
             "--source", source_display,
             "--mode", mode,
-            "--targets", *target_virtual_ids,
+            "--targets", *target_display_names,
         ]
 
         print("[DEBUG] cmd:", cmd)
@@ -391,3 +391,4 @@ if __name__ == "__main__":
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
+    

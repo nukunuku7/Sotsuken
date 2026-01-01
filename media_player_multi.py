@@ -1,33 +1,22 @@
-# ======================================================
-# media_player_multi.py (REVISED / OVERLAP + ALPHA)
-# ======================================================
-# 役割:
-# - source ディスプレイを N 分割(短冊)
-# - 各短冊を FHD に拡大
-# - perspective / warp_map を切替
-# - 左右 10% オーバーラップ + アルファブレンディング
-
 import sys
-import json
-import argparse
 import mss
+import cv2
+import signal
+import argparse
 import moderngl
 import numpy as np
-import cv2
-from pathlib import Path
-
-<<<<<<< HEAD
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QGuiApplication
-from PyQt5.QtWidgets import QApplication, QOpenGLWidget
+from PyQt5.QtWidgets import QOpenGLWidget, QApplication
 
-from editor.grid_utils import get_virtual_id
+from editor.grid_utils import load_points, log, get_virtual_id
+from warp_engine import (
+    prepare_warp,
+    convert_maps_to_uv_texture_data,
+)
 
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_DIR = BASE_DIR / "config"
+from pathlib import Path
 
-OVERLAP_RATIO = 0.10  # 10% overlap
-=======
 def get_simulator_name_for_screen(screen, edit_display_name):
     if screen.name() == edit_display_name:
         raise RuntimeError("Edit display must not be used as warp target")
@@ -44,36 +33,46 @@ def load_warp_uv_texture(ctx, uv_path, w, h):
     uv = np.load(uv_path).astype("f4")  # (H, W, 2)
     assert uv.shape == (h, w, 2), f"UV shape mismatch: {uv.shape}"
     return ctx.texture((w, h), 2, uv.tobytes(), dtype="f4")
->>>>>>> 97c68d26 (システム的には完全なる完成をしました。)
 
+def create_identity_uv(ctx, w, h):
+    xs = np.linspace(0, 1, w, dtype=np.float32)
+    ys = np.linspace(0, 1, h, dtype=np.float32)
+    u, v = np.meshgrid(xs, ys)
+    uv = np.dstack([u, v]).astype("f4")
+    return ctx.texture((w, h), 2, uv.tobytes(), dtype="f4")
 
 class GLDisplayWindow(QOpenGLWidget):
-<<<<<<< HEAD
-    def __init__(self, source, target, slice_geom, mode, warp_npz):
-=======
     def __init__(self, source_screen, target_screen, mode,
                  warp_info_all=None,
                  source_geometry=None,
                  edit_display_name=None):
->>>>>>> 97c68d26 (システム的には完全なる完成をしました。)
         super().__init__()
 
-        tg = target.geometry()
-        self.setGeometry(tg)
-        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_DeleteOnClose)
 
-        self.slice = slice_geom
-        self.mode = mode
+        g = target_screen.geometry()
+        self.setFixedSize(g.width(), g.height())
+        self.move(g.x(), g.y())
 
-        self.full_w = source.geometry().width()
-        self.full_h = source.geometry().height()
+        self.source_geometry = source_geometry
+        self.warp_info_all = warp_info_all
+
+        self.slice_index = source_geometry.get("index", 0)
+        self.slice_count = source_geometry.get("count", 1)
+        self.overlap_px = source_geometry.get("overlap", 0)
+
+        self.enable_blend = self.slice_count > 1
 
         self.sct = mss.mss()
-        self.monitor = slice_geom
+        self.monitor = {
+            "top": source_geometry["y"],
+            "left": source_geometry["x"],
+            "width": source_geometry["w"],
+            "height": source_geometry["h"],
+        }
 
-        self.warp_npz = warp_npz
-
-        self.timer = QTimer(self)
+        self.timer = QTimer()
         self.timer.timeout.connect(self.update)
         self.timer.start(16)
 
@@ -87,65 +86,83 @@ class GLDisplayWindow(QOpenGLWidget):
 
         self.ctx = moderngl.create_context()
 
+        # ===== フルスクリーンクアッド =====
         vertices = np.array([
-            -1, -1, 0, 0,
-             1, -1, 1, 0,
-            -1,  1, 0, 1,
-             1,  1, 1, 1,
+            -1.0, -1.0, 0.0, 1.0,
+             1.0, -1.0, 1.0, 1.0,
+            -1.0,  1.0, 0.0, 0.0,
+             1.0,  1.0, 1.0, 0.0,
         ], dtype='f4')
 
+        if self.enable_blend:
+            self.ctx.enable(moderngl.BLEND)
+            self.ctx.blend_func = (
+                moderngl.SRC_ALPHA,
+                moderngl.ONE_MINUS_SRC_ALPHA,
+            )
+
         self.prog = self.ctx.program(
-            vertex_shader='''
+            vertex_shader="""
                 #version 330
-                in vec2 in_pos;
-                in vec2 in_uv;
+                in vec2 in_vert;
+                in vec2 in_text;
                 out vec2 v_uv;
-                void main(){ gl_Position=vec4(in_pos,0,1); v_uv=in_uv; }
-            ''',
-            fragment_shader='''
+                void main() {
+                    gl_Position = vec4(in_vert, 0.0, 1.0);
+                    v_uv = in_text;
+                }
+            """,
+            fragment_shader="""
                 #version 330
+                uniform sampler2D original_tex;
+                uniform sampler2D warp_uv_tex;
+
+                uniform float slice_left;
+                uniform float slice_right;
+                uniform int enable_blend;
+
                 in vec2 v_uv;
                 out vec4 fragColor;
 
-                uniform sampler2D video_tex;
-                uniform sampler2D warp_tex;
-                uniform float alpha_l;
-                uniform float alpha_r;
-                uniform int mode;
+                void main() {
+                    vec2 warped_uv = texture(warp_uv_tex, v_uv).rg;
 
-                void main(){
-                    vec2 uv = v_uv;
-                    if(mode==1){ uv = texture(warp_tex, v_uv).rg; }
+                    // 範囲外は完全透明
+                    if (warped_uv.x < 0.0 || warped_uv.x > 1.0 ||
+                        warped_uv.y < 0.0 || warped_uv.y > 1.0) {
+                        fragColor = vec4(0.0);
+                        return;
+                    }
 
-                    float a = 1.0;
-                    if(v_uv.x < alpha_l) a = v_uv.x/alpha_l;
-                    if(v_uv.x > 1.0-alpha_r) a = (1.0-v_uv.x)/alpha_r;
+                    vec4 color = texture(original_tex, warped_uv);
 
-                    fragColor = vec4(texture(video_tex, uv).rgb, a);
+                    if (enable_blend == 1) {
+                        float alpha = 1.0;
+                        if (warped_uv.x < slice_left) {
+                            alpha = smoothstep(0.0, slice_left, warped_uv.x);
+                        } else if (warped_uv.x > slice_right) {
+                            alpha = smoothstep(1.0, slice_right, warped_uv.x);
+                        }
+                        color.a *= alpha;
+                    }
+
+                    fragColor = color;
                 }
-            '''
+            """
         )
 
         self.vbo = self.ctx.buffer(vertices.tobytes())
         self.vao = self.ctx.vertex_array(
-            self.prog, [(self.vbo, '2f 2f', 'in_pos', 'in_uv')]
+            self.prog,
+            [(self.vbo, '2f 2f', 'in_vert', 'in_text')]
         )
 
-        self.video_tex = self.ctx.texture((self.full_w, self.full_h), 4)
-        self.video_tex.swizzle = 'BGRA'
+        # ===== キャプチャテクスチャ =====
+        w = self.monitor["width"]
+        h = self.monitor["height"]
+        self.texture_video = self.ctx.texture((w, h), 4)
+        self.texture_video.swizzle = "BGRA"
 
-<<<<<<< HEAD
-        if self.mode == 'map':
-            mx = self.warp_npz['map_x']
-            my = self.warp_npz['map_y']
-            uv = np.dstack([mx, my]).astype('f4')
-            self.warp_tex = self.ctx.texture((self.full_w, self.full_h), 2, uv.tobytes(), dtype='f4')
-            self.warp_tex.use(1)
-
-        self.prog['alpha_l'].value = OVERLAP_RATIO
-        self.prog['alpha_r'].value = OVERLAP_RATIO
-        self.prog['mode'].value = 1 if self.mode=='map' else 0
-=======
         # ===== Warp UV テクスチャ =====
         simulator_name = get_simulator_name_for_screen(
             self.target_screen,
@@ -186,60 +203,22 @@ class GLDisplayWindow(QOpenGLWidget):
         self.prog["slice_left"].value = left + overlap
         self.prog["slice_right"].value = right - overlap
         self.prog["enable_blend"].value = 1 if self.enable_blend else 0
->>>>>>> 97c68d26 (システム的には完全なる完成をしました。)
 
     def paintGL(self):
-        frame = np.array(self.sct.grab(self.monitor))
-        frame = cv2.resize(frame, (self.full_w, self.full_h))
-        self.video_tex.write(frame.tobytes())
-        self.video_tex.use(0)
+        dpr = self.devicePixelRatioF()
+        self.ctx.viewport = (
+            0, 0,
+            int(self.width() * dpr),
+            int(self.height() * dpr),
+        )
+
+        img = self.sct.grab(self.monitor)
+        self.texture_video.write(img.raw)
+
+        self.texture_video.use(0)
+        self.texture_warp.use(1)
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
-<<<<<<< HEAD
-
-# ---------------- main ----------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--source', required=True)
-    parser.add_argument('--mode', required=True)
-    parser.add_argument('--targets', nargs='+', required=True)
-    args = parser.parse_args()
-
-    app = QApplication(sys.argv)
-    screens = {s.name(): s for s in QGuiApplication.screens()}
-
-    src = screens[args.source]
-    full_w = src.geometry().width()
-    full_h = src.geometry().height()
-
-    wins = []
-    n = len(args.targets)
-
-    for i, t in enumerate(args.targets):
-        tgt = screens[t]
-        overlap = int(full_w * OVERLAP_RATIO)
-        x0 = max(0, int(i*full_w/n - overlap))
-        w0 = int(full_w/n + overlap*2)
-
-        slice_geom = {
-            'top': 0,
-            'left': x0,
-            'width': w0,
-            'height': full_h
-        }
-
-        sim = f'ScreenSimulatorSet_{i+1}'
-        warp_npz = np.load(CONFIG_DIR/'warp_cache'/f'{sim}_map_{full_w}x{full_h}.npz')
-
-        win = GLDisplayWindow(src, tgt, slice_geom, args.mode, warp_npz)
-        win.show()
-        wins.append(win)
-
-    sys.exit(app.exec_())
-
-
-if __name__=='__main__':
-=======
 # ----------------------------------------------------------------------
 # main
 # ----------------------------------------------------------------------
@@ -306,5 +285,4 @@ def main():
 
 
 if __name__ == "__main__":
->>>>>>> 97c68d26 (システム的には完全なる完成をしました。)
     main()

@@ -4,16 +4,16 @@ import argparse
 import mss
 import moderngl
 import numpy as np
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtWidgets import QOpenGLWidget, QApplication
 
-from editor.grid_utils import get_virtual_id, log
+from editor.grid_utils import get_virtual_id
 from warp_engine import prepare_warp, convert_maps_to_uv_texture_data
 
 
 # ------------------------------------------------------------
-# GL Window
+# GL Window (1 window = 1 slice)
 # ------------------------------------------------------------
 class GLDisplayWindow(QOpenGLWidget):
     def __init__(
@@ -39,11 +39,10 @@ class GLDisplayWindow(QOpenGLWidget):
         self.overlap_px = overlap_px
 
         self.src_geom = source_geom
-        self.sct = mss.mss()
+        self.src_w = source_geom["width"]
+        self.src_h = source_geom["height"]
 
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update)
-        self.timer.start(16)
+        self.sct = mss.mss()
 
     # --------------------------------------------------------
     def initializeGL(self):
@@ -85,21 +84,22 @@ class GLDisplayWindow(QOpenGLWidget):
                 out vec4 fragColor;
 
                 void main() {
-                    vec2 warped_uv = texture(warp_tex, v_uv).rg;
+                    vec2 uv = texture(warp_tex, v_uv).rg;
 
-                    if (warped_uv.x < 0.0 || warped_uv.x > 1.0 ||
-                        warped_uv.y < 0.0 || warped_uv.y > 1.0) {
+                    if (uv.x < 0.0 || uv.x > 1.0 ||
+                        uv.y < 0.0 || uv.y > 1.0) {
                         fragColor = vec4(0.0);
                         return;
                     }
 
-                    vec4 col = texture(video_tex, warped_uv);
+                    vec4 col = texture(video_tex, uv);
 
+                    float x = uv.x;
                     float a = 1.0;
-                    if (v_uv.x < slice_l)
-                        a = smoothstep(0.0, slice_l, v_uv.x);
-                    else if (v_uv.x > slice_r)
-                        a = smoothstep(1.0, slice_r, v_uv.x);
+                    if (x < slice_l)
+                        a = smoothstep(0.0, slice_l, x);
+                    else if (x > slice_r)
+                        a = smoothstep(1.0, slice_r, x);
 
                     fragColor = vec4(col.rgb, col.a * a);
                 }
@@ -113,32 +113,38 @@ class GLDisplayWindow(QOpenGLWidget):
         )
 
         # video texture
-        w = self.src_geom["w"]
-        h = self.src_geom["h"]
-        self.video_tex = self.ctx.texture((w, h), 4)
+        self.video_tex = self.ctx.texture(
+            (self.src_w, self.src_h), 4
+        )
         self.video_tex.swizzle = "BGRA"
 
-        # warp map
-        map_pair = prepare_warp(
+        # warp map (1回だけ)
+        map_x, map_y = prepare_warp(
             display_name=self.display_id,
             mode=self.mode,
-            src_size=(w, h),
-            log_func=log,
+            src_size=(self.src_w, self.src_h),
         )
-        if map_pair is None:
-            raise RuntimeError("Grid data missing")
 
-        map_x, map_y = map_pair
-        uv_bytes = convert_maps_to_uv_texture_data(map_x, map_y, w, h)
-        self.warp_tex = self.ctx.texture((w, h), 2, uv_bytes, dtype="f4")
+        uv_bytes = convert_maps_to_uv_texture_data(
+            map_x, map_y, self.src_w, self.src_h
+        )
+
+        self.warp_tex = self.ctx.texture(
+            (self.src_w, self.src_h),
+            2,
+            uv_bytes,
+            dtype="f4",
+        )
 
         self.video_tex.use(0)
         self.warp_tex.use(1)
+
         self.prog["video_tex"].value = 0
         self.prog["warp_tex"].value = 1
 
+        # slice parameters
         slice_w = 1.0 / self.slice_count
-        overlap = self.overlap_px / w
+        overlap = self.overlap_px / self.src_w
 
         l = self.slice_index * slice_w + overlap
         r = (self.slice_index + 1) * slice_w - overlap
@@ -167,31 +173,31 @@ def main():
     screens = QGuiApplication.screens()
 
     src = next(s for s in screens if s.name() == args.source)
-    geom = src.geometry()
+    g = src.geometry()
 
     source_geom = {
-        "left": geom.x(),
-        "top": geom.y(),
-        "w": geom.width(),
-        "h": geom.height(),
+        "left": g.x(),
+        "top": g.y(),
+        "width": g.width(),
+        "height": g.height(),
     }
 
-    windows = []
     n = len(args.targets)
-    overlap_px = int(geom.width() * 0.1)
+    overlap_px = int(g.width() * 0.08)  # 8% 推奨
 
+    windows = []
     for i, disp in enumerate(args.targets):
         screen = next(s for s in screens if s.name() == disp)
         display_id = get_virtual_id(disp)
 
         win = GLDisplayWindow(
-            source_geom=source_geom,
-            target_screen=screen,
-            display_id=display_id,
-            mode=args.mode,
-            slice_index=i,
-            slice_count=n,
-            overlap_px=overlap_px,
+            source_geom,
+            screen,
+            display_id,
+            args.mode,
+            i,
+            n,
+            overlap_px,
         )
         win.show()
         windows.append(win)

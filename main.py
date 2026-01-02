@@ -89,13 +89,6 @@ class MainWindow(QMainWindow):
         self.init_display_info()
         self.init_projector_list()
 
-    def has_precomputed_warp(self, display_name, screen):
-        simulator = get_simulator_name_for_screen(screen, self.edit_display_name)
-        w = screen.geometry().width()
-        h = screen.geometry().height()
-        path = CONFIG_DIR / "warp_cache" / f"{simulator}_map_{w}x{h}.npz"
-        return path.exists()
-
     def init_display_info(self):
         saved = load_edit_profile()
 
@@ -300,32 +293,18 @@ class MainWindow(QMainWindow):
         screens_with_x.sort(key=lambda t: t[1])
         ordered_screens = [s for s, _ in screens_with_x]
 
-        # warp map の存在チェック
-        for screen in ordered_screens:
-            simulator = get_simulator_name_for_screen(screen, self.edit_display_name)
-            w, h = screen.geometry().width(), screen.geometry().height()
-            path = CONFIG_DIR / "warp_cache" / f"{simulator}_map_{w}x{h}.npz"
-            print(f"[DEBUG] checking warp: {path}")
-
-            if not path.exists():
-                print("[ERROR] warp map missing!")
-                return
-
         # ===== media_player_multi 起動 =====
         print("[DEBUG] launching media_player_multi")
 
         script_path = str(BASE_DIR / "media_player_multi.py")
-
         source_display = self.edit_display_name
 
-        # virtual id を左→右順で生成
         target_display_names = [
             screen.name()
             for screen in ordered_screens
         ]
 
-        mode_ui = self.mode_selector.currentText()
-        mode = "map" if mode_ui == "warp_map" else "perspective"
+        mode = self.mode_selector.currentText()
 
         cmd = [
             sys.executable,

@@ -278,7 +278,10 @@ class MainWindow(QMainWindow):
             if item.checkState() == Qt.Checked:
                 selected_screens.append(item.data(Qt.UserRole))
 
-        print("[DEBUG] selected:", selected_screens)
+        print(
+            "[DEBUG] selected:",
+            [get_virtual_id(s) for s in selected_screens]
+        )
 
         if not selected_screens:
             print("[ERROR] no display selected")

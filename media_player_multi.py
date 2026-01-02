@@ -1,4 +1,3 @@
-# media_player_multi.py
 import sys
 import argparse
 import mss
@@ -79,27 +78,39 @@ class GLDisplayWindow(QOpenGLWidget):
 
                 uniform float slice_l;
                 uniform float slice_r;
+                uniform float fade_w;
 
                 in vec2 v_uv;
                 out vec4 fragColor;
 
                 void main() {
+                    // ---- slice discard (screen space) ----
+                    if (v_uv.x < slice_l - fade_w ||
+                        v_uv.x > slice_r + fade_w) {
+                        discard;
+                    }
+
+                    // ---- warp lookup ----
                     vec2 uv = texture(warp_tex, v_uv).rg;
 
-                    if (uv.x < 0.0 || uv.x > 1.0 ||
+                    // NaN / out of range discard
+                    if (isnan(uv.x) || isnan(uv.y) ||
+                        uv.x < 0.0 || uv.x > 1.0 ||
                         uv.y < 0.0 || uv.y > 1.0) {
-                        fragColor = vec4(0.0);
-                        return;
+                        discard;
                     }
 
                     vec4 col = texture(video_tex, uv);
 
-                    float x = uv.x;
+                    // ---- overlap alpha ----
                     float a = 1.0;
-                    if (x < slice_l)
-                        a = smoothstep(0.0, slice_l, x);
-                    else if (x > slice_r)
-                        a = smoothstep(1.0, slice_r, x);
+
+                    if (v_uv.x < slice_l) {
+                        a = smoothstep(slice_l - fade_w, slice_l, v_uv.x);
+                    }
+                    else if (v_uv.x > slice_r) {
+                        a = smoothstep(slice_r + fade_w, slice_r, v_uv.x);
+                    }
 
                     fragColor = vec4(col.rgb, col.a * a);
                 }
@@ -112,13 +123,20 @@ class GLDisplayWindow(QOpenGLWidget):
             [(self.vbo, "2f 2f", "in_pos", "in_uv")]
         )
 
+        # ------------------------
         # video texture
+        # ------------------------
         self.video_tex = self.ctx.texture(
             (self.src_w, self.src_h), 4
         )
         self.video_tex.swizzle = "BGRA"
+        self.video_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.video_tex.repeat_x = False
+        self.video_tex.repeat_y = False
 
-        # warp map (1回だけ)
+        # ------------------------
+        # warp texture (cached)
+        # ------------------------
         map_x, map_y = prepare_warp(
             display_name=self.display_id,
             mode=self.mode,
@@ -135,6 +153,9 @@ class GLDisplayWindow(QOpenGLWidget):
             uv_bytes,
             dtype="f4",
         )
+        self.warp_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.warp_tex.repeat_x = False
+        self.warp_tex.repeat_y = False
 
         self.video_tex.use(0)
         self.warp_tex.use(1)
@@ -142,15 +163,18 @@ class GLDisplayWindow(QOpenGLWidget):
         self.prog["video_tex"].value = 0
         self.prog["warp_tex"].value = 1
 
+        # ------------------------
         # slice parameters
+        # ------------------------
         slice_w = 1.0 / self.slice_count
-        overlap = self.overlap_px / self.src_w
+        overlap_uv = self.overlap_px / self.src_w
 
-        l = self.slice_index * slice_w + overlap
-        r = (self.slice_index + 1) * slice_w - overlap
+        l = self.slice_index * slice_w
+        r = (self.slice_index + 1) * slice_w
 
         self.prog["slice_l"].value = l
         self.prog["slice_r"].value = r
+        self.prog["fade_w"].value = overlap_uv
 
     # --------------------------------------------------------
     def paintGL(self):
@@ -183,7 +207,7 @@ def main():
     }
 
     n = len(args.targets)
-    overlap_px = int(g.width() * 0.08)  # 8% 推奨
+    overlap_px = int(g.width() * 0.08)  # 8% overlap
 
     windows = []
     for i, disp in enumerate(args.targets):

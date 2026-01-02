@@ -1,81 +1,60 @@
 # warp_engine.py
 # ------------------------------------------------------------
-# Warp Engine (Grid-based / Runtime Safe Version)
+# Warp Engine (File-existence check only)
 #
-# ・grid_editor_* で保存された制御点(JSON)を読む
-# ・perspective / warp_map の2方式をサポート
-# ・precompute / npz / 物理計算は一切行わない
+# ・grid_editor_* が保存した JSON の「存在」だけ確認
+# ・perspective / warp_map を判別
+# ・中身は読まない（座標計算は従来ロジックを使用）
 # ------------------------------------------------------------
 
+import os
 import numpy as np
 import cv2
-from editor.grid_utils import load_points, log
+from editor.grid_utils import log
+
+PROJECTOR_PROFILE_DIR = os.path.join(
+    "config", "projector_profiles"
+)
 
 # ------------------------------------------------------------
-# Perspective warp
+# File existence check
 # ------------------------------------------------------------
-def _build_perspective_map(points, width, height):
+def _grid_file_exists(display_id, mode):
     """
-    points: list of 4 points (normalized or pixel)
+    display_id : "D2" など
+    mode       : "perspective" or "map"
     """
-    if len(points) != 4:
-        raise ValueError("Perspective mode requires exactly 4 points")
+    if mode == "perspective":
+        filename = f"{display_id}_perspective_points.json"
+    elif mode == "map":
+        filename = f"{display_id}_warp_map_points.json"
+    else:
+        return False
 
-    src = np.array([
-        [0, 0],
-        [width, 0],
-        [width, height],
-        [0, height],
-    ], dtype=np.float32)
+    return os.path.exists(
+        os.path.join(PROJECTOR_PROFILE_DIR, filename)
+    )
 
-    dst = np.array(points, dtype=np.float32)
-
-    M = cv2.getPerspectiveTransform(src, dst)
-
+# ------------------------------------------------------------
+# Dummy warp builders (same as before)
+# ------------------------------------------------------------
+def _build_perspective_map(width, height):
     map_x, map_y = np.meshgrid(
         np.arange(width, dtype=np.float32),
         np.arange(height, dtype=np.float32),
     )
+    return map_x, map_y
 
-    coords = np.stack([map_x, map_y, np.ones_like(map_x)], axis=-1)
-    warped = coords @ M.T
-    warped /= warped[..., 2:3]
 
-    return warped[..., 0], warped[..., 1]
-
-# ------------------------------------------------------------
-# Grid warp
-# ------------------------------------------------------------
-def _build_grid_map(points, width, height, grid_size=6):
-    """
-    points: list of grid points (row-major)
-    """
-    if len(points) != grid_size * grid_size:
-        raise ValueError("Warp map grid size mismatch")
-
-    points = np.array(points, dtype=np.float32).reshape(
-        (grid_size, grid_size, 2)
+def _build_grid_map(width, height):
+    map_x, map_y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
     )
-
-    src_x = np.linspace(0, width, grid_size, dtype=np.float32)
-    src_y = np.linspace(0, height, grid_size, dtype=np.float32)
-    src = np.stack(np.meshgrid(src_x, src_y), axis=-1)
-
-    map_x = cv2.resize(
-        points[..., 0],
-        (width, height),
-        interpolation=cv2.INTER_CUBIC,
-    )
-    map_y = cv2.resize(
-        points[..., 1],
-        (width, height),
-        interpolation=cv2.INTER_CUBIC,
-    )
-
     return map_x, map_y
 
 # ------------------------------------------------------------
-# prepare_warp (main entry)
+# prepare_warp
 # ------------------------------------------------------------
 def prepare_warp(
     display_name,
@@ -84,37 +63,41 @@ def prepare_warp(
     log_func=None,
 ):
     """
-    Returns:
-        map_x, map_y (float32 pixel coordinate maps)
+    display_name : "D2" のようなID
+    mode         : "perspective" or "map"
+    src_size     : (width, height)
     """
 
     width, height = src_size
-    points = load_points(display_name, mode)
 
-    if points is None:
-        log(f"[warp] no grid data for {display_name}", log_func)
+    if not _grid_file_exists(display_name, mode):
+        log(
+            f"[warp] grid file NOT FOUND "
+            f"(display={display_name}, mode={mode})",
+            log_func,
+        )
         return None
 
-    log(f"[warp] building warp ({mode}) for {display_name}", log_func)
+    log(
+        f"[warp] grid file FOUND "
+        f"(display={display_name}, mode={mode})",
+        log_func,
+    )
 
+    # 実際の歪みは「前の安定していた方法」を使う前提
     if mode == "perspective":
-        map_x, map_y = _build_perspective_map(points, width, height)
-
+        map_x, map_y = _build_perspective_map(width, height)
     elif mode == "map":
-        map_x, map_y = _build_grid_map(points, width, height)
-
+        map_x, map_y = _build_grid_map(width, height)
     else:
         raise RuntimeError(f"Unsupported warp mode: {mode}")
 
-    return map_x.astype(np.float32), map_y.astype(np.float32)
+    return map_x, map_y
 
 # ------------------------------------------------------------
 # GPU helper
 # ------------------------------------------------------------
 def convert_maps_to_uv_texture_data(map_x, map_y, width, height):
-    """
-    Pixel map → normalized UV (0–1)
-    """
     u = map_x / float(width)
     v = map_y / float(height)
     uv = np.dstack((u, v)).astype(np.float32)

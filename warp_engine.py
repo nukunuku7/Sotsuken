@@ -101,7 +101,11 @@ except Exception:
 # ----------------------------------------------------------------------
 # prepare_warp (CPU計算のみ)
 # ----------------------------------------------------------------------
-def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=None):
+def prepare_warp(display_name, mode, src_size,
+                 overlap_px=0,
+                 load_points_func=None,
+                 log_func=None):
+
     display_name = (
         display_name.replace("(", "_")
                     .replace(")", "_")
@@ -125,22 +129,40 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
             with open(cfg, "r", encoding="utf-8") as f:
                 pts = json.load(f)
 
-        matrix = generate_perspective_matrix(src_size, pts[:4])
+        pts = np.array(pts[:4], np.float32)
 
+        # ★ 先に定義する（重要）
         w, h = src_size
 
+        # pts がフルHD基準だった場合を補正
+        if pts.max() > w + 10:
+            scale_x = w / 1920.0
+            scale_y = h / 1080.0
+            pts[:, 0] *= scale_x
+            pts[:, 1] *= scale_y
+
+
+        matrix = generate_perspective_matrix(src_size, pts)
+
         # ★ 正しいグリッド生成（X/Y を明示）
+        # xs, ys は「キャプチャ画像全体」
         xs = np.tile(np.arange(w, dtype=np.float32), (h, 1))
         ys = np.tile(np.arange(h, dtype=np.float32)[:, None], (1, w))
 
-        # ★ warpPerspective は (w, h)
-        map_x = cv2.warpPerspective(xs, matrix, (w, h))
-        map_y = cv2.warpPerspective(ys, matrix, (w, h))
+        map_x = cv2.warpPerspective(xs, matrix, (w, h)) / (w - 1)
+        map_y = cv2.warpPerspective(ys, matrix, (w, h)) / (h - 1)
 
-        # ★ convertMaps で OpenCV 正規形式へ
-        map_x, map_y = cv2.convertMaps(map_x, map_y, cv2.CV_32FC1)
+        map_x = np.clip(map_x, 0.0, 1.0).astype(np.float32)
+        map_y = np.clip(map_y, 0.0, 1.0).astype(np.float32)
 
         warp_cache[cache_key] = (map_x, map_y)
+
+        _log(
+            f"[WARP DEBUG] map_x min/max={map_x.min():.3f}/{map_x.max():.3f}, "
+            f"map_y min/max={map_y.min():.3f}/{map_y.max():.3f}",
+            log_func
+        )
+
         return map_x, map_y
 
     # ---------------- warp_map (CPU heavy) ----------------
@@ -175,17 +197,17 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
     umin, vmin = uv.min(axis=0)
     umax, vmax = uv.max(axis=0)
 
-    w_out, h_out = src_size
-    map_x = np.zeros((h_out, w_out), np.float32)
-    map_y = np.zeros((h_out, w_out), np.float32)
+    w, h = src_size
+    map_x = np.zeros((h, w), np.float32)
+    map_y = np.zeros((h, w), np.float32)
 
     right = _normalize(np.cross(proj_dir, [0, 0, 1]))
     up = _normalize(np.cross(right, proj_dir))
 
-    for y in range(h_out):
-        for x in range(w_out):
-            u = (x / w_out - 0.5) * fov_h
-            v = (y / h_out - 0.5) * fov_v
+    for y in range(h):
+        for x in range(w):
+            u = (x / w - 0.5) * fov_h
+            v = (y / h - 0.5) * fov_v
             ray = _normalize(proj_dir + right * math.tan(u) + up * math.tan(v))
 
             hit, _, _ = _nearest_along_ray(proj_origin, ray, mirror_pts)
@@ -204,8 +226,8 @@ def prepare_warp(display_name, mode, src_size, load_points_func=None, log_func=N
             fv = (np.dot(rel, screen_v) - vmin) / (vmax - vmin)
 
             if 0 <= fu <= 1 and 0 <= fv <= 1:
-                map_x[y, x] = fu * (w_out - 1)
-                map_y[y, x] = (1 - fv) * (h_out - 1)
+                map_x[y, x] = fu * (w - 1)
+                map_y[y, x] = (1 - fv) * (h - 1)
 
     warp_cache[cache_key] = (map_x, map_y)
     return map_x, map_y
@@ -222,12 +244,3 @@ def warp_image(image, map_x, map_y):
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
-
-# ----------------------------------------------------------------------
-# UV map for ModernGL
-# ----------------------------------------------------------------------
-def convert_maps_to_uv_texture_data(map_x, map_y, width, height):
-    u = map_x.astype(np.float32) / width
-    v = map_y.astype(np.float32) / height
-    uv = np.dstack((u, v))
-    return uv.astype("f4").tobytes()

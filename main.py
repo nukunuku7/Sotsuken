@@ -276,17 +276,6 @@ class MainWindow(QMainWindow):
             cmd.append("--blend")
         subprocess.Popen(cmd)
 
-def is_gpu_available_main():
-    try:
-        import cupy as cp
-        cnt = cp.cuda.runtime.getDeviceCount()
-        if cnt <= 0:
-            return False
-        _ = cp.array([1], dtype=cp.int32) * 2
-        return True
-    except Exception:
-        return False
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     print("=== Display Mapping ===")

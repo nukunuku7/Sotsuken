@@ -12,7 +12,7 @@ from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtWidgets import QOpenGLWidget, QApplication
 
 from editor.grid_utils import load_points, log, get_virtual_id
-from warp_engine import prepare_warp, convert_maps_to_uv_texture_data
+from warp_engine import prepare_warp
 
 
 class GLDisplayWindow(QOpenGLWidget):
@@ -80,10 +80,10 @@ class GLDisplayWindow(QOpenGLWidget):
         # 1. 頂点データ（画面全体を覆う四角形）
         # x, y, u, v
         vertices = np.array([
-            -1.0, -1.0, 0.0, 1.0, # 左下 (画像座標系では左上に対応させるためVを反転等の調整が必要かも)
-             1.0, -1.0, 1.0, 1.0, # 右下
-            -1.0,  1.0, 0.0, 0.0, # 左上
-             1.0,  1.0, 1.0, 0.0, # 右上
+            -1.0, -1.0, 0.0, 1.0,
+            1.0, -1.0, 1.0, 1.0,
+            -1.0,  1.0, 0.0, 0.0,
+            1.0,  1.0, 1.0, 0.0,
         ], dtype='f4')
 
         # ブレンド有効化
@@ -111,40 +111,58 @@ class GLDisplayWindow(QOpenGLWidget):
 
                 """,
                 fragment_shader="""
-                #version 330 core
+                    #version 330 core
 
-                uniform sampler2D original_tex;
-                uniform sampler2D warp_uv_tex;
+                    uniform sampler2D original_tex;
+                    uniform sampler2D warp_uv_tex;
 
-                uniform float slice_left;
-                uniform float slice_right;
-                uniform int enable_blend;
+                    uniform float slice_left;
+                    uniform float slice_right;
+                    uniform int slice_index;
+                    uniform int slice_count;
+                    uniform int enable_blend;
 
-                in vec2 v_uv;
-                out vec4 fragColor;
+                    in vec2 v_uv;
+                    out vec4 fragColor;
 
-                void main() {
-                    vec2 warped_uv = texture(warp_uv_tex, v_uv).rg;
-                    warped_uv = clamp(warped_uv, 0.0, 1.0);
-                    vec4 color = texture(original_tex, warped_uv);
+                    void main() {
+                        // warp UV 取得
+                        vec2 warped_uv = texture(warp_uv_tex, v_uv).rg;
 
-                    if (enable_blend == 1) {
-                        float alpha = 1.0;
-
-                        // ★ 短冊の左フェード
-                        if (warped_uv.x < slice_left) {
-                            alpha = smoothstep(0.0, slice_left, warped_uv.x);
-                        }
-                        // ★ 短冊の右フェード
-                        else if (warped_uv.x > slice_right) {
-                            alpha = smoothstep(1.0, slice_right, warped_uv.x);
+                        // warp 範囲外は描画しない
+                        if (warped_uv.x <= 0.0 || warped_uv.x >= 1.0 ||
+                            warped_uv.y <= 0.0 || warped_uv.y >= 1.0) {
+                            discard;
                         }
 
-                        color.a *= alpha;
+                        // 元映像サンプリング
+                        vec4 color = texture(original_tex, warped_uv);
+
+                        if (enable_blend == 1) {
+                            float alpha = 1.0;
+
+                            bool is_left_edge  = (slice_index == 0);
+                            bool is_right_edge = (slice_index == slice_count - 1);
+
+                            // 左 overlap: body以外でも alpha=0→1
+                            if (!is_left_edge && v_uv.x < slice_left) {
+                                alpha = v_uv.x / slice_left;
+                            }
+                            // 右 overlap: body以外でも alpha=1→0
+                            else if (!is_right_edge && v_uv.x > slice_right) {
+                                alpha = (1.0 - v_uv.x) / (1.0 - slice_right);
+                            }
+
+                            alpha = clamp(alpha, 0.0, 1.0);
+                            color.a *= alpha;
+
+                            // 完全透明のピクセルだけ discard（最適化）
+                            if (color.a <= 0.0001)
+                                discard;
+                        }
+
+                        fragColor = color;
                     }
-
-                    fragColor = color;
-                }
 
                 """
             )
@@ -171,66 +189,52 @@ class GLDisplayWindow(QOpenGLWidget):
         self.texture_video = self.ctx.texture((cap_w, cap_h), 4) # BGRA=4ch
         self.texture_video.swizzle = 'BGRA' # BGRA -> RGBへスウィズル(並び替え)
         
-        # 歪み補正マップ用テクスチャ (Binding 1)
-        # warp_engine から map_x, map_y を取得済みと仮定
+        # --- 歪み補正マップ用テクスチャ (Binding 1) ------------------------
         if self.warp_info_all is not None:
             map_x, map_y = self.warp_info_all
+
+            # warp_engine が返した UV をそのまま使う
+            uv_data = np.dstack([map_x, map_y]).astype("f4")
 
             target_w = self.width()
             target_h = self.height()
 
-            cap_w = self.monitor["width"]
-            cap_h = self.monitor["height"]
-            body_w = cap_w - self.overlap_px * 2
+            map_x_resized = cv2.resize(
+                map_x, (target_w, target_h), interpolation=cv2.INTER_LINEAR
+            )
+            map_y_resized = cv2.resize(
+                map_y, (target_w, target_h), interpolation=cv2.INTER_LINEAR
+            )
 
-            map_x = map_x.astype(np.float32)
-            map_y = map_y.astype(np.float32)
-
-            # target → short strip
-            map_x = map_x * (body_w / target_w)
-            map_y = map_y * (cap_h / target_h)
-
-            # overlap
-            map_x = (map_x + self.overlap_px) / cap_w
-            map_y = map_y / cap_h
-
-            # map_x, map_y は short-strip 解像度
-            # → 出力解像度にリサンプルする
-            uv_data = cv2.resize(
-                np.dstack([map_x, map_y]),
-                (target_w, target_h),
-                interpolation=cv2.INTER_LINEAR
-            ).astype("f4")
+            uv_data = np.dstack([map_x_resized, map_y_resized]).astype("f4")
 
             print(
-                f"[DEBUG] {self.windowTitle() or 'proj'} "
-                f"map_x min/max = {map_x.min()} / {map_x.max()}, "
-                f"source_w = {self.monitor['width']}"
+                f"[DEBUG] proj warp_uv "
+                f"src={cap_w}x{cap_h} → dst={target_w}x{target_h}, "
+                f"map_x min/max={uv_data[...,0].min():.3f}/{uv_data[...,0].max():.3f}"
             )
 
         else:
-            # warp_map が無い場合：恒等UVを自前生成
-            cap_w = self.monitor["width"]
-            cap_h = self.monitor["height"]
+            # warp_map が無い場合：恒等UVを表示解像度で生成
+            target_w = self.width()
+            target_h = self.height()
 
-            xs = np.linspace(0.0, 1.0, cap_w, dtype=np.float32)
-            ys = np.linspace(0.0, 1.0, cap_h, dtype=np.float32)
+            xs = np.linspace(0.0, 1.0, target_w, dtype=np.float32)
+            ys = np.linspace(0.0, 1.0, target_h, dtype=np.float32)
 
             u, v = np.meshgrid(xs, ys)
             uv_data = np.dstack([u, v]).astype("f4")
 
-            print(
-                f"[DEBUG] {self.windowTitle() or 'proj'} "
-                f"identity UV map, source_w = {self.monitor['width']}"
-            )
+            print("[DEBUG] identity warp UV")
 
+        # warp UV テクスチャ生成（★必ず表示解像度★）
         warp_h, warp_w = uv_data.shape[:2]
 
         self.texture_warp = self.ctx.texture(
             (warp_w, warp_h),
             2,
             data=uv_data,
-            dtype='f4'
+            dtype="f4"
         )
 
         # シェーダーにテクスチャ番号を教える
@@ -239,6 +243,8 @@ class GLDisplayWindow(QOpenGLWidget):
         self.prog["slice_left"].value = self.slice_valid_left
         self.prog["slice_right"].value = self.slice_valid_right
         self.prog["enable_blend"].value = 1 if self.enable_blend else 0
+        self.prog["slice_index"].value = self.slice_index
+        self.prog["slice_count"].value = self.slice_count
 
     def resizeGL(self, w, h):
         # ★ これが「GPUが実際に描くサイズ」

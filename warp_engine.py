@@ -118,62 +118,119 @@ def prepare_warp(display_name, mode, src_size,
     if cache_key in warp_cache:
         return warp_cache[cache_key]
 
-    # ---------------- perspective ----------------
-    if mode == "perspective":
-        if load_points_func:
+    w, h = src_size
+
+    # ==================================================
+    # load points
+    # ==================================================
+    pts = None
+    if load_points_func:
+        try:
             pts = load_points_func(display_name, mode)
-        else:
-            cfg = f"config/projector_profiles/__._{display_name}_{mode}_points.json"
-            if not os.path.exists(cfg):
-                return None
-            with open(cfg, "r", encoding="utf-8") as f:
-                pts = json.load(f)
+        except Exception:
+            pts = None
 
-        pts = np.array(pts[:4], np.float32)
+    # ==================================================
+    # slice → full screen mapping
+    # ==================================================
+    slice_left = 0
+    full_width = w
 
-        # ★ 先に定義する（重要）
-        w, h = src_size
+    key = display_name.replace("\\", "").replace(".", "")
+    if key in DISPLAY_TO_SIMSET:
+        info = DISPLAY_TO_SIMSET[key]
+        slice_left = int(info.get("left", 0))
+        full_width = int(info.get("full_width", w))
 
-        # pts がフルHD基準だった場合を補正
-        if pts.max() > w + 10:
-            scale_x = w / 1920.0
-            scale_y = h / 1080.0
-            pts[:, 0] *= scale_x
-            pts[:, 1] *= scale_y
+    # ==================================================
+    # base grid（LOCAL 0–1）
+    # ==================================================
+    xs = np.tile(np.arange(w, dtype=np.float32), (h, 1))
+    ys = np.tile(np.arange(h, dtype=np.float32)[:, None], (1, w))
 
+    grid_u_local = xs / max(w - 1, 1)
+    grid_v = ys / max(h - 1, 1)
 
-        matrix = generate_perspective_matrix(src_size, pts)
+    # ==================================================
+    # ★ perspective は perspective モードのときだけ ★
+    # ==================================================
+    if mode == "perspective" and pts is not None and len(pts) >= 4:
+        grid_pts = np.array(pts[:4], np.float32)
 
-        # ★ 正しいグリッド生成（X/Y を明示）
-        # xs, ys は「キャプチャ画像全体」
-        xs = np.tile(np.arange(w, dtype=np.float32), (h, 1))
-        ys = np.tile(np.arange(h, dtype=np.float32)[:, None], (1, w))
+        if grid_pts.max() > 1.5:
+            grid_pts[:, 0] *= w / 1920.0
+            grid_pts[:, 1] *= h / 1080.0
 
-        map_x = cv2.warpPerspective(xs, matrix, (w, h)) / (w - 1)
-        map_y = cv2.warpPerspective(ys, matrix, (w, h)) / (h - 1)
+        grid_matrix = generate_perspective_matrix(src_size, grid_pts)
 
-        map_x = np.clip(map_x, 0.0, 1.0).astype(np.float32)
-        map_y = np.clip(map_y, 0.0, 1.0).astype(np.float32)
-
-        warp_cache[cache_key] = (map_x, map_y)
-
-        _log(
-            f"[WARP DEBUG] map_x min/max={map_x.min():.3f}/{map_x.max():.3f}, "
-            f"map_y min/max={map_y.min():.3f}/{map_y.max():.3f}",
-            log_func
+        grid_u_local = cv2.warpPerspective(
+            grid_u_local, grid_matrix, (w, h)
+        )
+        grid_v = cv2.warpPerspective(
+            grid_v, grid_matrix, (w, h)
         )
 
-        return map_x, map_y
+        grid_u_local = np.clip(grid_u_local, 0.0, 1.0)
+        grid_v = np.clip(grid_v, 0.0, 1.0)
 
-    # ---------------- warp_map (CPU heavy) ----------------
+    # ==================================================
+    # LOCAL → GLOBAL 正規化
+    # ==================================================
+    grid_u = (slice_left + grid_u_local * (w - 1)) / max(full_width - 1, 1)
+
+    # ==================================================
+    # mask
+    # ==================================================
+    grid_mask = np.ones((h, w), dtype=bool)
+
+    if mode == "warp_map" and pts is not None and len(pts) >= 8:
+        poly = np.array(pts, np.float32)
+
+        if poly.max() <= 1.5:
+            poly[:, 0] *= w
+            poly[:, 1] *= h
+        else:
+            poly[:, 0] *= w / 1920.0
+            poly[:, 1] *= h / 1080.0
+
+        poly_i = poly.astype(np.int32)
+        mask_img = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(mask_img, [poly_i.reshape(-1, 1, 2)], 1)
+
+        if np.count_nonzero(mask_img) > 0:
+            grid_mask = mask_img.astype(bool)
+
+    _log(f"[DEBUG] grid_mask valid pixels = {np.count_nonzero(grid_mask)}", log_func)
+
+    # ==================================================
+    # perspective モードはここで終了
+    # ==================================================
+    if mode == "perspective":
+        warp_cache[cache_key] = (
+            grid_u.astype(np.float32),
+            grid_v.astype(np.float32)
+        )
+        return warp_cache[cache_key]
+
+    # ==================================================
+    # warp_map（以下は完全に元のまま）
+    # ==================================================
     if environment_config is None:
         return None
 
-    sim_idx = DISPLAY_TO_SIMSET.get(display_name)
-    if sim_idx is None:
+    import re
+    m = re.search(r"(\d+)$", display_name)
+    if not m:
         return None
 
-    sim_set = environment_config["screen_simulation_sets"][sim_idx]
+    display_num = int(m.group(1))
+    sim_set_number = max(1, 5 - display_num)
+    sim_idx = sim_set_number - 1
+
+    sets = environment_config["screen_simulation_sets"]
+    sim_idx = max(0, min(sim_idx, len(sets) - 1))
+    sim_set = sets[sim_idx]
+
     proj = sim_set["projector"]
     mirror = sim_set["mirror"]
     screen = sim_set["screen"]
@@ -187,7 +244,10 @@ def prepare_warp(display_name, mode, src_size,
     screen_pts = np.array(screen["vertices"], np.float64)
 
     mirror_normals = _estimate_normals_for_pointcloud(mirror_pts)
-    screen_centroid, screen_u, screen_v, screen_normal = _fit_plane(screen_pts)
+    screen_centroid, screen_u, screen_v, screen_n = _fit_plane(screen_pts)
+
+    if np.dot(np.cross(screen_u, screen_v), screen_n) < 0:
+        screen_v = -screen_v
 
     uv = np.stack([
         np.dot(screen_pts - screen_centroid, screen_u),
@@ -196,23 +256,38 @@ def prepare_warp(display_name, mode, src_size,
 
     umin, vmin = uv.min(axis=0)
     umax, vmax = uv.max(axis=0)
+    du = max(umax - umin, 1e-6)
+    dv = max(vmax - vmin, 1e-6)
 
-    w, h = src_size
     map_x = np.zeros((h, w), np.float32)
     map_y = np.zeros((h, w), np.float32)
 
     right = _normalize(np.cross(proj_dir, [0, 0, 1]))
     up = _normalize(np.cross(right, proj_dir))
 
+    mirror_hit = screen_hit = uv_written = 0
+
     for y in range(h):
         for x in range(w):
-            u = (x / w - 0.5) * fov_h
-            v = (y / h - 0.5) * fov_v
-            ray = _normalize(proj_dir + right * math.tan(u) + up * math.tan(v))
+
+            if not grid_mask[y, x]:
+                continue
+
+            gu = grid_u[y, x]
+            gv = grid_v[y, x]
+
+            nx = 2.0 * gu - 1.0
+            ny = 2.0 * gv - 1.0
+
+            sx = nx * math.tan(fov_h * 0.5)
+            sy = ny * math.tan(fov_v * 0.5)
+
+            ray = _normalize(proj_dir + right * sx + up * sy)
 
             hit, _, _ = _nearest_along_ray(proj_origin, ray, mirror_pts)
             if hit is None:
                 continue
+            mirror_hit += 1
 
             n = mirror_normals[np.argmin(np.linalg.norm(mirror_pts - hit, axis=1))]
             refl = _reflect(ray, n)
@@ -220,17 +295,27 @@ def prepare_warp(display_name, mode, src_size,
             sh, _, _ = _nearest_along_ray(hit + refl * 1e-6, refl, screen_pts)
             if sh is None:
                 continue
+            screen_hit += 1
 
             rel = sh - screen_centroid
-            fu = (np.dot(rel, screen_u) - umin) / (umax - umin)
-            fv = (np.dot(rel, screen_v) - vmin) / (vmax - vmin)
+            fu = (np.dot(rel, screen_u) - umin) / du
+            fv = (np.dot(rel, screen_v) - vmin) / dv
 
-            if 0 <= fu <= 1 and 0 <= fv <= 1:
-                map_x[y, x] = fu * (w - 1)
-                map_y[y, x] = (1 - fv) * (h - 1)
+            if 0.0 <= fu <= 1.0 and 0.0 <= fv <= 1.0:
+                map_x[y, x] = fu
+                map_y[y, x] = 1.0 - fv
+                uv_written += 1
 
-    warp_cache[cache_key] = (map_x, map_y)
-    return map_x, map_y
+    _log(
+        f"[DEBUG] mirror_hit={mirror_hit}, screen_hit={screen_hit}, uv_written={uv_written}",
+        log_func
+    )
+
+    warp_cache[cache_key] = (
+        map_x.astype(np.float32),
+        map_y.astype(np.float32)
+    )
+    return warp_cache[cache_key]
 
 # ----------------------------------------------------------------------
 # warp_image (CPUのみ)

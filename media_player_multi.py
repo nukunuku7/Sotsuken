@@ -37,12 +37,16 @@ class GLDisplayWindow(QOpenGLWidget):
         # スライスジオメトリ情報
         self.slice_index = source_geometry.get("index", 0)
         self.slice_count = source_geometry.get("count", 1)
-        self.overlap_px = source_geometry.get("overlap", 0)
+        overlap_l = source_geometry.get("overlap_left", 0)
+        overlap_r = source_geometry.get("overlap_right", 0)
         self.enable_blend = self.slice_count > 1
 
-        slice_w = source_geometry.get("w", 1)
-        self.slice_valid_left = self.overlap_px / slice_w
-        self.slice_valid_right = 1.0 - self.slice_valid_left
+        cap_w = source_geometry.get("w", 1)
+        body_w = cap_w - overlap_l - overlap_r
+
+        # ★ cap_w 基準で正規化する
+        self.slice_valid_left  = overlap_l / cap_w
+        self.slice_valid_right = (overlap_l + body_w) / cap_w
                 
         # MSSの初期化 (キャプチャ範囲設定)
         self.sct = mss.mss()
@@ -126,37 +130,52 @@ class GLDisplayWindow(QOpenGLWidget):
                     out vec4 fragColor;
 
                     void main() {
-                        // warp UV 取得
-                        vec2 warped_uv = texture(warp_uv_tex, v_uv).rg;
 
-                        // warp 範囲外は描画しない
-                        if (warped_uv.x <= 0.0 || warped_uv.x >= 1.0 ||
-                            warped_uv.y <= 0.0 || warped_uv.y >= 1.0) {
+                        // --------------------------------------------------
+                        // ① 表示範囲は cap 全体（discard しない）
+                        // --------------------------------------------------
+
+                        // --------------------------------------------------
+                        // ② body 正規化（clamp が重要）
+                        // --------------------------------------------------
+                        float body_u = (v_uv.x - slice_left) / (slice_right - slice_left);
+                        body_u = clamp(body_u, 0.0, 1.0);
+
+                        // --------------------------------------------------
+                        // ③ warp は body 正規化で参照
+                        // --------------------------------------------------
+                        vec2 warp_uv = texture(warp_uv_tex, vec2(body_u, v_uv.y)).rg;
+
+                        // --------------------------------------------------
+                        // ④ body → cap UV
+                        // --------------------------------------------------
+                        float src_x = mix(slice_left, slice_right, warp_uv.x);
+                        float src_y = warp_uv.y;
+
+                        if (src_x <= 0.0 || src_x >= 1.0 ||
+                            src_y <= 0.0 || src_y >= 1.0) {
                             discard;
                         }
 
-                        // 元映像サンプリング
-                        vec4 color = texture(original_tex, warped_uv);
+                        vec4 color = texture(original_tex, vec2(src_x, src_y));
 
+                        // --------------------------------------------------
+                        // ⑤ overlap α ブレンド（循環対応）
+                        // --------------------------------------------------
                         if (enable_blend == 1) {
                             float alpha = 1.0;
 
                             bool is_left_edge  = (slice_index == 0);
                             bool is_right_edge = (slice_index == slice_count - 1);
 
-                            // 左 overlap: body以外でも alpha=0→1
                             if (!is_left_edge && v_uv.x < slice_left) {
                                 alpha = v_uv.x / slice_left;
                             }
-                            // 右 overlap: body以外でも alpha=1→0
                             else if (!is_right_edge && v_uv.x > slice_right) {
                                 alpha = (1.0 - v_uv.x) / (1.0 - slice_right);
                             }
 
-                            alpha = clamp(alpha, 0.0, 1.0);
-                            color.a *= alpha;
-
-                            // 完全透明のピクセルだけ discard（最適化）
+                            color.a *= clamp(alpha, 0.0, 1.0);
                             if (color.a <= 0.0001)
                                 discard;
                         }
@@ -182,8 +201,6 @@ class GLDisplayWindow(QOpenGLWidget):
         # 2. テクスチャ作成
         cap_w = self.monitor["width"]
         cap_h = self.monitor["height"]
-
-        body_w = cap_w - self.overlap_px * 2   # 元の短冊幅
         
         # 映像用テクスチャ (Binding 0)
         self.texture_video = self.ctx.texture((cap_w, cap_h), 4) # BGRA=4ch
@@ -357,17 +374,46 @@ def main():
 
     # 各ターゲットディスプレイごとにウィンドウを作成
     for proj_index, name in enumerate(args.targets):
+
         slice_x = src_base_x + slice_w * proj_index
         slice_y = src_base_y
 
-        # オーバーラップ分を拡張
-        cap_x = slice_x - overlap_px
-        cap_w = slice_w + overlap_px * 2
+        # -------------------------------
+        # overlap 計算（方法A：端は片側）
+        # -------------------------------
+        if slice_count == 1:
+            # 1画面のみ（overlap なし）
+            overlap_l = 0
+            overlap_r = 0
+            cap_x = slice_x
+            cap_w = slice_w
 
-        # 画面外に出ないようにクランプ
+        else:
+            body_x = src_base_x + slice_w * proj_index
+
+            if proj_index == 0:
+                # 先頭：右のみ overlap
+                overlap_l = 0
+                overlap_r = overlap_px
+
+            elif proj_index == slice_count - 1:
+                # 末尾：左のみ overlap
+                overlap_l = overlap_px
+                overlap_r = 0
+
+            else:
+                # 中央：左右 overlap
+                overlap_l = overlap_px
+                overlap_r = overlap_px
+
+            cap_x = body_x - overlap_l
+            cap_w = slice_w + overlap_l + overlap_r
+
+        # -------------------------------
+        # 画面外クランプ
+        # -------------------------------
         cap_x = max(src_base_x, cap_x)
 
-        # 右端もはみ出さないように
         max_x = src_base_x + sg.width() - cap_w
         cap_x = min(cap_x, max_x)
 
@@ -378,7 +424,8 @@ def main():
             "h": slice_h,
             "index": proj_index,
             "count": slice_count,
-            "overlap": overlap_px,
+            "overlap_left": overlap_l,
+            "overlap_right": overlap_r,
         }
 
         if name not in screens_by_name:
@@ -387,12 +434,10 @@ def main():
 
         target_screen = screens_by_name[name]
 
-        # ★★★ ここが最重要修正 ★★★
         warp_info = prepare_warp(
             name,
             args.mode,
-            (slice_geometry["w"],
-             slice_geometry["h"]),  # 1920x1080
+            (slice_geometry["w"], slice_geometry["h"]),
             load_points_func=load_points,
             log_func=log
         )
@@ -404,11 +449,10 @@ def main():
             target_screen,
             args.mode,
             warp_info_all=warp_info,
-            source_geometry=slice_geometry # ★ source_geometry を渡す
+            source_geometry=slice_geometry
         )
         window.show()
         windows.append(window)
-        offset_x += target_screen.geometry().width()
 
     if not windows:
         print("❌ 出力ディスプレイがありません。終了します。")

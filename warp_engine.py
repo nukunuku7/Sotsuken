@@ -152,29 +152,23 @@ def prepare_warp(display_name, mode, src_size,
     grid_v = ys / max(h - 1, 1)
 
     # ==================================================
-    # ★ perspective は perspective モードのときだけ ★
+    # perspective
     # ==================================================
     if mode == "perspective" and pts is not None and len(pts) >= 4:
         grid_pts = np.array(pts[:4], np.float32)
-
         if grid_pts.max() > 1.5:
             grid_pts[:, 0] *= w / 1920.0
             grid_pts[:, 1] *= h / 1080.0
 
-        grid_matrix = generate_perspective_matrix(src_size, grid_pts)
-
-        grid_u_local = cv2.warpPerspective(
-            grid_u_local, grid_matrix, (w, h)
-        )
-        grid_v = cv2.warpPerspective(
-            grid_v, grid_matrix, (w, h)
-        )
+        M = generate_perspective_matrix(src_size, grid_pts)
+        grid_u_local = cv2.warpPerspective(grid_u_local, M, (w, h))
+        grid_v = cv2.warpPerspective(grid_v, M, (w, h))
 
         grid_u_local = np.clip(grid_u_local, 0.0, 1.0)
         grid_v = np.clip(grid_v, 0.0, 1.0)
 
     # ==================================================
-    # LOCAL → GLOBAL 正規化
+    # LOCAL → GLOBAL
     # ==================================================
     grid_u = (slice_left + grid_u_local * (w - 1)) / max(full_width - 1, 1)
 
@@ -185,7 +179,6 @@ def prepare_warp(display_name, mode, src_size,
 
     if mode == "warp_map" and pts is not None and len(pts) >= 8:
         poly = np.array(pts, np.float32)
-
         if poly.max() <= 1.5:
             poly[:, 0] *= w
             poly[:, 1] *= h
@@ -193,18 +186,11 @@ def prepare_warp(display_name, mode, src_size,
             poly[:, 0] *= w / 1920.0
             poly[:, 1] *= h / 1080.0
 
-        poly_i = poly.astype(np.int32)
         mask_img = np.zeros((h, w), np.uint8)
-        cv2.fillPoly(mask_img, [poly_i.reshape(-1, 1, 2)], 1)
-
+        cv2.fillPoly(mask_img, [poly.astype(np.int32)], 1)
         if np.count_nonzero(mask_img) > 0:
             grid_mask = mask_img.astype(bool)
 
-    _log(f"[DEBUG] grid_mask valid pixels = {np.count_nonzero(grid_mask)}", log_func)
-
-    # ==================================================
-    # perspective モードはここで終了
-    # ==================================================
     if mode == "perspective":
         warp_cache[cache_key] = (
             grid_u.astype(np.float32),
@@ -213,112 +199,148 @@ def prepare_warp(display_name, mode, src_size,
         return warp_cache[cache_key]
 
     # ==================================================
-    # warp_map（以下は完全に元のまま）
+    # warp_map : 自動ゆがみ補正（分離設計）
     # ==================================================
-    if environment_config is None:
+    if mode != "warp_map" or pts is None:
         return None
 
-    import re
-    m = re.search(r"(\d+)$", display_name)
-    if not m:
+    grid = build_10x10_grid_from_points(pts, w, h, log_func)
+    if grid is None:
         return None
 
-    display_num = int(m.group(1))
-    sim_set_number = max(1, 5 - display_num)
-    sim_idx = sim_set_number - 1
+    grid = normalize_grid_by_outer(grid)
 
-    sets = environment_config["screen_simulation_sets"]
-    sim_idx = max(0, min(sim_idx, len(sets) - 1))
-    sim_set = sets[sim_idx]
+    map_x, map_y = build_warp_map_from_grid(grid, w, h)
 
-    proj = sim_set["projector"]
-    mirror = sim_set["mirror"]
-    screen = sim_set["screen"]
-
-    proj_origin = np.array(proj["origin"], np.float64)
-    proj_dir = _normalize(np.array(proj["direction"], np.float64))
-    fov_h = math.radians(proj.get("fov_h", 53.13))
-    fov_v = math.radians(proj.get("fov_v", fov_h))
-
-    mirror_pts = np.array(mirror["vertices"], np.float64)
-    screen_pts = np.array(screen["vertices"], np.float64)
-
-    mirror_normals = _estimate_normals_for_pointcloud(mirror_pts)
-    screen_centroid, screen_u, screen_v, screen_n = _fit_plane(screen_pts)
-
-    if np.dot(np.cross(screen_u, screen_v), screen_n) < 0:
-        screen_v = -screen_v
-
-    uv = np.stack([
-        np.dot(screen_pts - screen_centroid, screen_u),
-        np.dot(screen_pts - screen_centroid, screen_v)
-    ], axis=1)
-
-    umin, vmin = uv.min(axis=0)
-    umax, vmax = uv.max(axis=0)
-    du = max(umax - umin, 1e-6)
-    dv = max(vmax - vmin, 1e-6)
-
-    map_x = np.zeros((h, w), np.float32)
-    map_y = np.zeros((h, w), np.float32)
-
-    right = _normalize(np.cross(proj_dir, [0, 0, 1]))
-    up = _normalize(np.cross(right, proj_dir))
-
-    mirror_hit = screen_hit = uv_written = 0
-
-    for y in range(h):
-        for x in range(w):
-
-            if not grid_mask[y, x]:
-                continue
-
-            gu = grid_u[y, x]
-            gv = grid_v[y, x]
-
-            nx = 2.0 * gu - 1.0
-            ny = 2.0 * gv - 1.0
-
-            sx = nx * math.tan(fov_h * 0.5)
-            sy = ny * math.tan(fov_v * 0.5)
-
-            ray = _normalize(proj_dir + right * sx + up * sy)
-
-            hit, _, _ = _nearest_along_ray(proj_origin, ray, mirror_pts)
-            if hit is None:
-                continue
-            mirror_hit += 1
-
-            n = mirror_normals[np.argmin(np.linalg.norm(mirror_pts - hit, axis=1))]
-            refl = _reflect(ray, n)
-
-            sh, _, _ = _nearest_along_ray(hit + refl * 1e-6, refl, screen_pts)
-            if sh is None:
-                continue
-            screen_hit += 1
-
-            rel = sh - screen_centroid
-            fu = (np.dot(rel, screen_u) - umin) / du
-            fv = (np.dot(rel, screen_v) - vmin) / dv
-
-            if 0.0 <= fu <= 1.0 and 0.0 <= fv <= 1.0:
-                map_x[y, x] = fu
-                map_y[y, x] = 1.0 - fv
-                uv_written += 1
-
-    _log(
-        f"[DEBUG] mirror_hit={mirror_hit}, screen_hit={screen_hit}, uv_written={uv_written}",
-        log_func
-    )
-
-    warp_cache[cache_key] = (
-        map_x.astype(np.float32),
-        map_y.astype(np.float32)
-    )
+    warp_cache[cache_key] = (map_x, map_y)
     return warp_cache[cache_key]
 
 # ----------------------------------------------------------------------
-# warp_image (CPUのみ)
+# Grid utilities
+# ----------------------------------------------------------------------
+def build_10x10_grid_from_points(pts, w, h, log_func=None):
+    """
+    pts: 36 or 100 points (pixel space)
+    return: grid[10,10,2] in pixel space
+    """
+    pts = np.asarray(pts, np.float32)
+
+    # ---- normalize input to pixel ----
+    if pts.max() <= 1.5:
+        pts[:, 0] *= (w - 1)
+        pts[:, 1] *= (h - 1)
+    else:
+        pts[:, 0] *= w / 1920.0
+        pts[:, 1] *= h / 1080.0
+
+    # ---- full grid ----
+    if len(pts) == 100:
+        return pts.reshape(10, 10, 2)
+
+    # ---- outer 36 only ----
+    if len(pts) != 36:
+        _log("[warp_map] pts must be 36 or 100", log_func)
+        return None
+
+    grid = np.zeros((10, 10, 2), np.float32)
+    idx = 0
+
+    grid[0, :]        = pts[idx:idx+10]; idx += 10
+    grid[1:9, 9]      = pts[idx:idx+8];  idx += 8
+    grid[9, ::-1]     = pts[idx:idx+10]; idx += 10
+    grid[8:0:-1, 0]   = pts[idx:idx+8]
+
+    # ---- interpolate interior ----
+    for y in range(1, 9):
+        for x in range(1, 9):
+            grid[y, x] = (
+                grid[y, 0] * (1 - x / 9.0) +
+                grid[y, 9] * (x / 9.0)
+            )
+
+    return grid
+
+# ----------------------------------------------------------------------
+# build_ideal_grid
+# ----------------------------------------------------------------------
+def build_ideal_grid():
+    ideal = np.zeros((10, 10, 2), np.float32)
+    for j in range(10):
+        for i in range(10):
+            ideal[j, i] = [i / 9.0, j / 9.0]
+    return ideal
+
+# ----------------------------------------------------------------------
+# normalize_grid_by_outer
+# ----------------------------------------------------------------------
+def normalize_grid_by_outer(grid):
+    norm = grid.copy()
+
+    for y in range(1, 9):
+        ty = y / 9.0
+        top    = grid[0, :]
+        bottom = grid[9, :]
+
+        for x in range(1, 9):
+            tx = x / 9.0
+
+            p_top    = top[x]
+            p_bottom = bottom[x]
+            p_left   = grid[y, 0]
+            p_right  = grid[y, 9]
+
+            # 横補間
+            ph = p_left * (1 - tx) + p_right * tx
+            # 縦補間
+            pv = p_top * (1 - ty) + p_bottom * ty
+
+            # 合成（平均）
+            norm[y, x] = (ph + pv) * 0.5
+
+    return norm
+
+# ----------------------------------------------------------------------
+# build_10x10_grid_from_points
+# ----------------------------------------------------------------------
+def build_warp_map_from_grid(grid, w, h):
+    map_x = np.zeros((h, w), np.float32)
+    map_y = np.zeros((h, w), np.float32)
+
+    for y in range(h):
+        v = y / (h - 1) * 9.0
+        j = int(np.clip(math.floor(v), 0, 8))
+        fv = v - j
+
+        for x in range(w):
+            u = x / (w - 1) * 9.0
+            i = int(np.clip(math.floor(u), 0, 8))
+            fu = u - i
+
+            # 実スクリーン上の4点
+            p00 = grid[j,     i]
+            p10 = grid[j,     i + 1]
+            p01 = grid[j + 1, i]
+            p11 = grid[j + 1, i + 1]
+
+            p = (
+                p00 * (1 - fu) * (1 - fv) +
+                p10 * fu       * (1 - fv) +
+                p01 * (1 - fu) * fv +
+                p11 * fu       * fv
+            )
+
+            # ★逆写像として設定
+            map_x[y, x] = p[0]
+            map_y[y, x] = p[1]
+
+    # OpenCV 用に正規化
+    map_x /= (w - 1)
+    map_y /= (h - 1)
+
+    return map_x, map_y
+
+# ----------------------------------------------------------------------
+# warp_image
 # ----------------------------------------------------------------------
 def warp_image(image, map_x, map_y):
     return cv2.remap(
@@ -329,3 +351,5 @@ def warp_image(image, map_x, map_y):
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
+
+    

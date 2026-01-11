@@ -24,6 +24,37 @@ def sanitize_filename(display_name: str, mode: str):
     safe = safe.strip("_")
     return f"{safe}_{mode}_points.json"
 
+# 外周36点の生成関数をここに統合
+def generate_border_points(width, height, divisions=10):
+    pts = []
+    step = 1.0 / (divisions - 1)
+
+    # top
+    for i in range(divisions):
+        x = width * (i * step)
+        y = 0
+        pts.append([x, y])
+
+    # right
+    for i in range(1, divisions - 1):
+        x = width
+        y = height * (i * step)
+        pts.append([x, y])
+
+    # bottom
+    for i in reversed(range(divisions)):
+        x = width * (i * step)
+        y = height
+        pts.append([x, y])
+
+    # left
+    for i in reversed(range(1, divisions - 1)):
+        x = 0
+        y = height * (i * step)
+        pts.append([x, y])
+
+    return pts
+
 
 # --- 仮想IDルール: 左から順に D1, D2, ... を振る ---
 def get_virtual_id(display_name: str) -> str:

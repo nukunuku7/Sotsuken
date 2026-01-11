@@ -16,9 +16,6 @@ dependencies = [
     # --- GPU描画関連 (今回のリファクタリングで必須に追加) ---
     # moderngl: GPUシェーダーベースの高性能描画に必須
     "moderngl",
-
-    # 計算ツールにて必要なので追加
-    "scipy",
     
     # PyQt5 はご要望により除外しています
     # uv sync --active

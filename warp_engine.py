@@ -199,145 +199,129 @@ def prepare_warp(display_name, mode, src_size,
         return warp_cache[cache_key]
 
     # ==================================================
-    # warp_map : 自動ゆがみ補正（分離設計）
+    # warp_map : 曲線外周 → 曲線補間グリッド → セル単位射影押し込み
     # ==================================================
     if mode != "warp_map" or pts is None:
         return None
 
-    grid = build_10x10_grid_from_points(pts, w, h, log_func)
-    if grid is None:
-        return None
+    pts_np = np.asarray(pts, np.float32)
 
-    grid = normalize_grid_by_outer(grid)
-
-    map_x, map_y = build_warp_map_from_grid(grid, w, h)
-
-    warp_cache[cache_key] = (map_x, map_y)
-    return warp_cache[cache_key]
-
-# ----------------------------------------------------------------------
-# Grid utilities
-# ----------------------------------------------------------------------
-def build_10x10_grid_from_points(pts, w, h, log_func=None):
-    """
-    pts: 36 or 100 points (pixel space)
-    return: grid[10,10,2] in pixel space
-    """
-    pts = np.asarray(pts, np.float32)
-
-    # ---- normalize input to pixel ----
-    if pts.max() <= 1.5:
-        pts[:, 0] *= (w - 1)
-        pts[:, 1] *= (h - 1)
+    # ------------------------------
+    # 正規化（pts → pixel）
+    # ------------------------------
+    if pts_np.max() <= 1.5:
+        pts_np[:, 0] *= (w - 1)
+        pts_np[:, 1] *= (h - 1)
     else:
-        pts[:, 0] *= w / 1920.0
-        pts[:, 1] *= h / 1080.0
+        pts_np[:, 0] *= w / 1920.0
+        pts_np[:, 1] *= h / 1080.0
 
-    # ---- full grid ----
-    if len(pts) == 100:
-        return pts.reshape(10, 10, 2)
-
-    # ---- outer 36 only ----
-    if len(pts) != 36:
-        _log("[warp_map] pts must be 36 or 100", log_func)
+    if len(pts_np) != 36:
+        _log("[warp_map] require exactly 36 outer points", log_func)
         return None
 
-    grid = np.zeros((10, 10, 2), np.float32)
+    # ------------------------------
+    # 外周分解（時計回り）
+    # ------------------------------
     idx = 0
+    top    = pts_np[idx:idx+10]; idx += 10
+    right  = pts_np[idx:idx+8];  idx += 8
+    bottom = pts_np[idx:idx+10]; idx += 10
+    left   = pts_np[idx:idx+8]
 
-    grid[0, :]        = pts[idx:idx+10]; idx += 10
-    grid[1:9, 9]      = pts[idx:idx+8];  idx += 8
-    grid[9, ::-1]     = pts[idx:idx+10]; idx += 10
-    grid[8:0:-1, 0]   = pts[idx:idx+8]
+    bottom = bottom[::-1]
+    left   = left[::-1]
 
-    # ---- interpolate interior ----
-    for y in range(1, 9):
-        for x in range(1, 9):
-            grid[y, x] = (
-                grid[y, 0] * (1 - x / 9.0) +
-                grid[y, 9] * (x / 9.0)
+    # ------------------------------
+    # 距離ベース等間隔再サンプリング
+    # ------------------------------
+    def resample_curve(curve, n):
+        d = np.linalg.norm(curve[1:] - curve[:-1], axis=1)
+        s = np.concatenate([[0.0], np.cumsum(d)])
+        t = np.linspace(0, s[-1], n)
+        x = np.interp(t, s, curve[:, 0])
+        y = np.interp(t, s, curve[:, 1])
+        return np.stack([x, y], axis=1)
+
+    top    = resample_curve(top,    10)
+    right  = resample_curve(right,  10)
+    bottom = resample_curve(bottom, 10)
+    left   = resample_curve(left,   10)
+
+    # ------------------------------
+    # Coons Patch による 10x10 グリッド生成
+    # ------------------------------
+    grid = np.zeros((10, 10, 2), np.float32)
+
+    for j in range(10):
+        v = j / 9.0
+        for i in range(10):
+            u = i / 9.0
+
+            B = (
+                (1 - v) * top[i] +
+                v * bottom[i] +
+                (1 - u) * left[j] +
+                u * right[j]
             )
 
-    return grid
+            C = (
+                (1 - u) * (1 - v) * top[0] +
+                u * (1 - v) * top[9] +
+                (1 - u) * v * bottom[0] +
+                u * v * bottom[9]
+            )
 
-# ----------------------------------------------------------------------
-# build_ideal_grid
-# ----------------------------------------------------------------------
-def build_ideal_grid():
-    ideal = np.zeros((10, 10, 2), np.float32)
-    for j in range(10):
-        for i in range(10):
-            ideal[j, i] = [i / 9.0, j / 9.0]
-    return ideal
+            grid[j, i] = B - C
 
-# ----------------------------------------------------------------------
-# normalize_grid_by_outer
-# ----------------------------------------------------------------------
-def normalize_grid_by_outer(grid):
-    norm = grid.copy()
-
-    for y in range(1, 9):
-        ty = y / 9.0
-        top    = grid[0, :]
-        bottom = grid[9, :]
-
-        for x in range(1, 9):
-            tx = x / 9.0
-
-            p_top    = top[x]
-            p_bottom = bottom[x]
-            p_left   = grid[y, 0]
-            p_right  = grid[y, 9]
-
-            # 横補間
-            ph = p_left * (1 - tx) + p_right * tx
-            # 縦補間
-            pv = p_top * (1 - ty) + p_bottom * ty
-
-            # 合成（平均）
-            norm[y, x] = (ph + pv) * 0.5
-
-    return norm
-
-# ----------------------------------------------------------------------
-# build_10x10_grid_from_points
-# ----------------------------------------------------------------------
-def build_warp_map_from_grid(grid, w, h):
+    # ------------------------------
+    # 各セルの逆射影行列＋マスク生成
+    # ------------------------------
     map_x = np.zeros((h, w), np.float32)
     map_y = np.zeros((h, w), np.float32)
 
-    for y in range(h):
-        v = y / (h - 1) * 9.0
-        j = int(np.clip(math.floor(v), 0, 8))
-        fv = v - j
+    filled_mask = np.zeros((h, w), np.uint8)
 
-        for x in range(w):
-            u = x / (w - 1) * 9.0
-            i = int(np.clip(math.floor(u), 0, 8))
-            fu = u - i
+    for j in range(9):
+        for i in range(9):
+            dst = np.array([
+                grid[j,   i],
+                grid[j,   i+1],
+                grid[j+1, i+1],
+                grid[j+1, i]
+            ], np.float32)
 
-            # 実スクリーン上の4点
-            p00 = grid[j,     i]
-            p10 = grid[j,     i + 1]
-            p01 = grid[j + 1, i]
-            p11 = grid[j + 1, i + 1]
+            src = np.array([
+                [i / 9,     j / 9],
+                [(i+1)/9,   j / 9],
+                [(i+1)/9, (j+1)/9],
+                [i / 9,   (j+1)/9]
+            ], np.float32)
 
-            p = (
-                p00 * (1 - fu) * (1 - fv) +
-                p10 * fu       * (1 - fv) +
-                p01 * (1 - fu) * fv +
-                p11 * fu       * fv
-            )
+            Hinv = cv2.getPerspectiveTransform(dst, src)
 
-            # ★逆写像として設定
-            map_x[y, x] = p[0]
-            map_y[y, x] = p[1]
+            # セルマスク作成
+            cell_mask = np.zeros((h, w), np.uint8)
+            cv2.fillPoly(cell_mask, [dst.astype(np.int32)], 1)
 
-    # OpenCV 用に正規化
-    map_x /= (w - 1)
-    map_y /= (h - 1)
+            ys, xs = np.where((cell_mask == 1) & (filled_mask == 0))
+            if len(xs) == 0:
+                continue
 
-    return map_x, map_y
+            pts_xy = np.stack([xs, ys, np.ones_like(xs)], axis=1).astype(np.float32)
+            uvw = (Hinv @ pts_xy.T).T
+
+            valid = uvw[:, 2] != 0.0
+            uv = np.zeros((len(xs), 2), np.float32)
+            uv[valid, 0] = uvw[valid, 0] / uvw[valid, 2]
+            uv[valid, 1] = uvw[valid, 1] / uvw[valid, 2]
+
+            map_x[ys, xs] = np.clip(uv[:, 0], 0.0, 1.0)
+            map_y[ys, xs] = np.clip(uv[:, 1], 0.0, 1.0)
+            filled_mask[ys, xs] = 1
+
+    warp_cache[cache_key] = (map_x, map_y)
+    return warp_cache[cache_key]
 
 # ----------------------------------------------------------------------
 # warp_image
@@ -351,5 +335,3 @@ def warp_image(image, map_x, map_y):
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
-
-    

@@ -1,5 +1,4 @@
-# media_player_multi.py
-
+#　media_player_multi.py
 import sys
 import mss
 import cv2
@@ -38,27 +37,31 @@ class GLDisplayWindow(QOpenGLWidget):
         self.slice_index = source_geometry["index"]
         self.slice_count = source_geometry["count"]
 
-        overlap_l = source_geometry["overlap_left"]
-        overlap_r = source_geometry["overlap_right"]
-
-        cap_w = source_geometry["w"]
-        body_w = cap_w - overlap_l - overlap_r
+        self.overlap_l_px = source_geometry["overlap_left"]
+        self.overlap_r_px = source_geometry["overlap_right"]
+        self.body_w_px = source_geometry["body_width"]
+        self.cap_w_px = self.overlap_l_px + self.body_w_px + self.overlap_r_px
 
         self.enable_blend = self.slice_count > 1
-
-        # ★ cap 基準 → body 正規化
-        self.body_overlap = overlap_l / body_w if body_w > 0 else 0.0
 
         # ----------------------------
         # MSS キャプチャ領域
         # ----------------------------
         self.sct = mss.mss()
+        # キャプチャは body + overlap
         self.monitor = {
             "top": source_geometry["y"],
             "left": source_geometry["x"],
-            "width": cap_w,
+            "width": self.cap_w_px,
             "height": source_geometry["h"],
         }
+
+        # ----------------------------
+        # キャプチャ正規化
+        # ----------------------------
+        self.body_to_cap = self.body_w_px / self.cap_w_px
+        self.cap_offset = self.overlap_l_px / self.cap_w_px
+        self.overlap_norm = self.overlap_l_px / self.body_w_px if self.body_w_px > 0 else 0.0
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update)
@@ -162,8 +165,8 @@ class GLDisplayWindow(QOpenGLWidget):
 
         # ======================================
         # Video texture (cap size)
-        cap_w = self.monitor["width"]
-        cap_h = self.monitor["height"]
+        cap_w = self.cap_w_px
+        cap_h = self.source_geometry["h"]
 
         self.texture_video = self.ctx.texture((cap_w, cap_h), 4)
         self.texture_video.swizzle = "BGRA"
@@ -173,6 +176,7 @@ class GLDisplayWindow(QOpenGLWidget):
         map_x, map_y, valid_mask = self.warp_info_all
         tw, th = self.width(), self.height()
 
+        # resize to window framebuffer
         map_x = cv2.resize(map_x, (tw, th), interpolation=cv2.INTER_LINEAR)
         map_y = cv2.resize(map_y, (tw, th), interpolation=cv2.INTER_LINEAR)
         uv_data = np.dstack([map_x, map_y]).astype("f4")
@@ -185,7 +189,6 @@ class GLDisplayWindow(QOpenGLWidget):
         )
 
         valid_mask = cv2.resize(valid_mask, (tw, th), interpolation=cv2.INTER_NEAREST)
-
         self.texture_mask = self.ctx.texture(
             (tw, th),
             1,
@@ -194,54 +197,40 @@ class GLDisplayWindow(QOpenGLWidget):
         )
 
         # ======================================
-        # ★ 正しい overlap / body / cap 計算 ★
-        overlap_l_px = self.source_geometry["overlap_left"]
-        overlap_r_px = self.source_geometry["overlap_right"]
-        body_w_px    = self.source_geometry["body_width"]
-        cap_w_px     = overlap_l_px + body_w_px + overlap_r_px
-
-        cap_offset  = overlap_l_px / cap_w_px
-        body_to_cap = body_w_px / cap_w_px
-        overlap_norm = overlap_l_px / body_w_px if body_w_px > 0 else 0.0
-
-        # ======================================
         # Uniforms
         self.prog["original_tex"].value = 0
         self.prog["warp_uv_tex"].value = 1
         self.prog["warp_mask_tex"].value = 2
 
-        self.prog["cap_offset"].value  = cap_offset
-        self.prog["body_to_cap"].value = body_to_cap
-        self.prog["overlap_norm"].value = overlap_norm
+        self.prog["cap_offset"].value  = self.cap_offset
+        self.prog["body_to_cap"].value = self.body_to_cap
+        self.prog["overlap_norm"].value = self.overlap_norm
 
         self.prog["fade_left"].value  = 1 if self.slice_index > 0 else 0
         self.prog["fade_right"].value = 1 if self.slice_index < self.slice_count - 1 else 0
         self.prog["enable_blend"].value = 1 if self.enable_blend else 0
 
     def resizeGL(self, w, h):
-        # ★ これが「GPUが実際に描くサイズ」
         dpr = self.devicePixelRatioF()
         log(f"[Qt] resizeGL logical={w}x{h}, framebuffer={int(w*dpr)}x{int(h*dpr)}")
 
     def paintGL(self):
-        """毎フレーム呼ばれる描画処理"""
+        """毎フレーム描画"""
 
-        # ★ Qt が viewport を上書きした直後なので、ここで再設定する
         dpr = self.devicePixelRatioF()
         w = int(self.width() * dpr)
         h = int(self.height() * dpr)
+        self.ctx.viewport = (0, 0, w, h)
 
-        self.ctx.viewport = (0, 0, w, h)  # 1920x1080
-
-        # 1. 画面キャプチャ (CPU)
-        # MSSの grab は非常に高速ですが、ここのバイナリ取得だけが唯一のCPUコストです
+        # ----------------------------
+        # MSSキャプチャ (body + overlap)
+        # ----------------------------
         sct_img = self.sct.grab(self.monitor)
-        
-        # 2. テクスチャ転送 (CPU -> GPU)
-        # 画像変換(opencv等)は一切せず、生バイト列をそのままGPUに投げ込む
         self.texture_video.write(sct_img.raw)
-        
-        # 3. 描画実行 (GPU)
+
+        # ----------------------------
+        # 描画
+        # ----------------------------
         self.texture_video.use(0)
         self.texture_warp.use(1)
         self.texture_mask.use(2)
@@ -249,9 +238,8 @@ class GLDisplayWindow(QOpenGLWidget):
 
         if not hasattr(self, "_once"):
             self._once = True
-            print("[DEBUG MSS]")
-            print(" monitor =", self.monitor)
-            print(" sct_img.size =", sct_img.size)
+            print("[DEBUG MSS] monitor =", self.monitor, "size =", sct_img.size)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -266,13 +254,12 @@ def main():
 
     app = QApplication(sys.argv)
 
-    # --- Ctrl+C (SIGINT) を有効化 ---
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     timer = QTimer()
     timer.start(100)
     timer.timeout.connect(lambda: None)
 
-    # --- 仮想IDに統一 ---
+    # --- 仮想ID
     src_vid = get_virtual_id(args.source)
     if not src_vid:
         print(f"❌ ソース {args.source} の内部ID変換に失敗")
@@ -282,7 +269,6 @@ def main():
     args.source = src_vid
     args.targets = tgt_vids
 
-    # --- QScreen 取得 ---
     screens_by_name = {}
     for s in QGuiApplication.screens():
         vid = get_virtual_id(s.name())
@@ -308,11 +294,7 @@ def main():
 
     windows = []
 
-    # ==========================================================
-    # 各ターゲットディスプレイ
-    # ==========================================================
     for proj_index, name in enumerate(args.targets):
-
         body_x = src_base_x + slice_w * proj_index
 
         # -------------------------------
@@ -334,9 +316,7 @@ def main():
         cap_x = body_x - overlap_l
         cap_w = slice_w + overlap_l + overlap_r
 
-        # -------------------------------
-        # 画面外クランプ
-        # -------------------------------
+        # clamp
         cap_x = max(src_base_x, cap_x)
         max_x = src_base_x + sg.width() - cap_w
         cap_x = min(cap_x, max_x)
@@ -344,13 +324,13 @@ def main():
         slice_geometry = {
             "x": cap_x,
             "y": src_base_y,
-            "w": cap_w,                 # ★ キャプチャ幅（body + overlap）
+            "w": cap_w,
             "h": slice_h,
             "index": proj_index,
             "count": slice_count,
             "overlap_left": overlap_l,
             "overlap_right": overlap_r,
-            "body_width": slice_w,      # ★ warp 用（重要）
+            "body_width": slice_w,
         }
 
         if name not in screens_by_name:
@@ -359,13 +339,10 @@ def main():
 
         target_screen = screens_by_name[name]
 
-        # ======================================================
-        # ★ warp は body 幅のみで計算する ★
-        # ======================================================
         warp_info = prepare_warp(
             name,
             args.mode,
-            (slice_w, slice_h),          # ← cap ではなく body
+            (slice_w, slice_h),
             load_points_func=load_points,
             log_func=log
         )
@@ -387,6 +364,7 @@ def main():
         sys.exit(1)
 
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()

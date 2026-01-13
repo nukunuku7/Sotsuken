@@ -21,247 +21,202 @@ class GLDisplayWindow(QOpenGLWidget):
                  source_geometry=None):
         super().__init__()
 
-        # ウィンドウ設定
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_DeleteOnClose)
-        
-        # スクリーン配置
+
         g = target_screen.geometry()
         self.setFixedSize(g.width(), g.height())
         self.move(g.x(), g.y())
 
-        # パラメータ保存
+        self.source_geometry = source_geometry
         self.source_screen = source_screen
         self.warp_info_all = warp_info_all
 
-        # スライスジオメトリ情報
-        self.slice_index = source_geometry.get("index", 0)
-        self.slice_count = source_geometry.get("count", 1)
-        overlap_l = source_geometry.get("overlap_left", 0)
-        overlap_r = source_geometry.get("overlap_right", 0)
-        self.enable_blend = self.slice_count > 1
+        # ----------------------------
+        # slice 情報
+        # ----------------------------
+        self.slice_index = source_geometry["index"]
+        self.slice_count = source_geometry["count"]
 
-        cap_w = source_geometry.get("w", 1)
+        overlap_l = source_geometry["overlap_left"]
+        overlap_r = source_geometry["overlap_right"]
+
+        cap_w = source_geometry["w"]
         body_w = cap_w - overlap_l - overlap_r
 
-        # ★ cap_w 基準で正規化する
-        self.slice_valid_left  = overlap_l / cap_w
-        self.slice_valid_right = (overlap_l + body_w) / cap_w
-                
-        # MSSの初期化 (キャプチャ範囲設定)
-        self.sct = mss.mss()
-        # source_screen の座標を取得
-        sg = source_geometry
+        self.enable_blend = self.slice_count > 1
 
-        # MSS用のキャプチャ領域辞書
+        # ★ cap 基準 → body 正規化
+        self.body_overlap = overlap_l / body_w if body_w > 0 else 0.0
+
+        # ----------------------------
+        # MSS キャプチャ領域
+        # ----------------------------
+        self.sct = mss.mss()
         self.monitor = {
-            "top": sg["y"],
-            "left": sg["x"],
-            "width": sg["w"],
-            "height": sg["h"],
+            "top": source_geometry["y"],
+            "left": source_geometry["x"],
+            "width": cap_w,
+            "height": source_geometry["h"],
         }
 
-        # フレームレート制御用タイマー (60FPS目標)
         self.timer = QTimer()
-        self.timer.timeout.connect(self.update) # update() が paintGL() を呼ぶ
-        self.timer.start(16) # 約60fps
+        self.timer.timeout.connect(self.update)
+        self.timer.start(16)
 
     def initializeGL(self):
-        """OpenGLの初期化：一度だけ呼ばれる"""
         self.ctx = moderngl.create_context()
 
-        # === GPU 情報を取得して表示 ==========================
-        try:
-            vendor = self.ctx.info["GL_VENDOR"]
-            renderer = self.ctx.info["GL_RENDERER"]
-            version = self.ctx.info["GL_VERSION"]
-            log(f"🟢 GPU 検出: {renderer} ({vendor})")
-            log(f"    OpenGL Version: {version}")
-        except Exception as e:
-            log(f"⚠️ GPU 情報の取得に失敗しました: {e}")
-        # =====================================================
-
-        # 1. 頂点データ（画面全体を覆う四角形）
-        # x, y, u, v
+        # ======================================
+        # fullscreen quad
         vertices = np.array([
             -1.0, -1.0, 0.0, 1.0,
             1.0, -1.0, 1.0, 1.0,
             -1.0,  1.0, 0.0, 0.0,
             1.0,  1.0, 1.0, 0.0,
-        ], dtype='f4')
+        ], dtype="f4")
 
-        # ブレンド有効化
         if self.enable_blend:
             self.ctx.enable(moderngl.BLEND)
             self.ctx.blend_func = (
-                moderngl.SRC_ALPHA,
+                moderngl.ONE,
                 moderngl.ONE_MINUS_SRC_ALPHA,
             )
 
-        # シェーダー作成
-        try:
-            self.prog = self.ctx.program(
-                vertex_shader="""
-                    #version 330
-                    in vec2 in_vert;
-                    in vec2 in_text;
+        # ======================================
+        # Shader
+        self.prog = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_vert;
+                in vec2 in_text;
+                out vec2 v_uv;
+                void main() {
+                    gl_Position = vec4(in_vert, 0.0, 1.0);
+                    v_uv = in_text;
+                }
+            """,
+            fragment_shader="""
+                #version 330 core
 
-                    out vec2 v_uv;
+                uniform sampler2D original_tex;
+                uniform sampler2D warp_uv_tex;
+                uniform sampler2D warp_mask_tex;
 
-                    void main() {
-                        gl_Position = vec4(in_vert, 0.0, 1.0);
-                        v_uv = in_text;
-                    }
+                uniform float cap_offset;
+                uniform float body_to_cap;
+                uniform float overlap_norm;
 
-                """,
-                fragment_shader="""
-                    #version 330 core
+                uniform int fade_left;
+                uniform int fade_right;
+                uniform int enable_blend;
 
-                    uniform sampler2D original_tex;
-                    uniform sampler2D warp_uv_tex;
+                in vec2 v_uv;
+                out vec4 fragColor;
 
-                    uniform float slice_left;
-                    uniform float slice_right;
-                    uniform int slice_index;
-                    uniform int slice_count;
-                    uniform int enable_blend;
+                void main() {
+                    float mask = texture(warp_mask_tex, v_uv).r;
+                    if (mask < 0.5)
+                        discard;
 
-                    in vec2 v_uv;
-                    out vec4 fragColor;
+                    vec2 warp_uv = texture(warp_uv_tex, v_uv).rg;
 
-                    void main() {
+                    // body → cap
+                    vec2 cap_uv;
+                    cap_uv.x = warp_uv.x * body_to_cap + cap_offset;
+                    cap_uv.y = warp_uv.y;
 
-                        // --------------------------------------------------
-                        // ① 表示範囲は cap 全体（discard しない）
-                        // --------------------------------------------------
+                    vec4 color = texture(original_tex, cap_uv);
 
-                        // --------------------------------------------------
-                        // ② body 正規化（clamp が重要）
-                        // --------------------------------------------------
-                        float body_u = (v_uv.x - slice_left) / (slice_right - slice_left);
-                        body_u = clamp(body_u, 0.0, 1.0);
+                    if (enable_blend == 1 && overlap_norm > 0.0) {
+                        float alpha = 1.0;
 
-                        // --------------------------------------------------
-                        // ③ warp は body 正規化で参照
-                        // --------------------------------------------------
-                        vec2 warp_uv = texture(warp_uv_tex, vec2(body_u, v_uv.y)).rg;
+                        if (fade_left == 1 && warp_uv.x < overlap_norm) {
+                            alpha = warp_uv.x / overlap_norm;
+                        }
 
-                        // --------------------------------------------------
-                        // ④ body → cap UV
-                        // --------------------------------------------------
-                        float src_x = mix(slice_left, slice_right, warp_uv.x);
-                        float src_y = warp_uv.y;
+                        if (fade_right == 1 && warp_uv.x > 1.0 - overlap_norm) {
+                            alpha = (1.0 - warp_uv.x) / overlap_norm;
+                        }
 
-                        if (src_x <= 0.0 || src_x >= 1.0 ||
-                            src_y <= 0.0 || src_y >= 1.0) {
+                        alpha = clamp(alpha, 0.0, 1.0);
+                        color.rgb *= alpha;
+                        color.a = alpha;
+
+                        if (color.a <= 0.0001)
                             discard;
-                        }
-
-                        vec4 color = texture(original_tex, vec2(src_x, src_y));
-
-                        // --------------------------------------------------
-                        // ⑤ overlap α ブレンド（循環対応）
-                        // --------------------------------------------------
-                        if (enable_blend == 1) {
-                            float alpha = 1.0;
-
-                            bool is_left_edge  = (slice_index == 0);
-                            bool is_right_edge = (slice_index == slice_count - 1);
-
-                            if (!is_left_edge && v_uv.x < slice_left) {
-                                alpha = v_uv.x / slice_left;
-                            }
-                            else if (!is_right_edge && v_uv.x > slice_right) {
-                                alpha = (1.0 - v_uv.x) / (1.0 - slice_right);
-                            }
-
-                            color.a *= clamp(alpha, 0.0, 1.0);
-                            if (color.a <= 0.0001)
-                                discard;
-                        }
-
-                        fragColor = color;
                     }
 
-                """
-            )
-        except Exception as e:
-            # ★★★ 強制的にエラーメッセージを出力 ★★★
-            print(f"\n[FATAL GLSL ERROR] シェーダーコンパイルまたはリンクに失敗しました:\n{e}")
-            import sys
-            # エラーを表示させるためにプロセスを強制終了
-            sys.exit(1)
-            
-        # VBO / VAO 作成
-        self.vbo = self.ctx.buffer(vertices.tobytes())
-        self.vao = self.ctx.vertex_array(self.prog, [
-            (self.vbo, '2f 2f', 'in_vert', 'in_text')
-        ])
+                    fragColor = color;
+                }
+            """
+        )
 
-        # 2. テクスチャ作成
+        # ======================================
+        # VAO
+        self.vbo = self.ctx.buffer(vertices.tobytes())
+        self.vao = self.ctx.vertex_array(
+            self.prog,
+            [(self.vbo, "2f 2f", "in_vert", "in_text")]
+        )
+
+        # ======================================
+        # Video texture (cap size)
         cap_w = self.monitor["width"]
         cap_h = self.monitor["height"]
-        
-        # 映像用テクスチャ (Binding 0)
-        self.texture_video = self.ctx.texture((cap_w, cap_h), 4) # BGRA=4ch
-        self.texture_video.swizzle = 'BGRA' # BGRA -> RGBへスウィズル(並び替え)
-        
-        # --- 歪み補正マップ用テクスチャ (Binding 1) ------------------------
-        if self.warp_info_all is not None:
-            map_x, map_y = self.warp_info_all
 
-            # warp_engine が返した UV をそのまま使う
-            uv_data = np.dstack([map_x, map_y]).astype("f4")
+        self.texture_video = self.ctx.texture((cap_w, cap_h), 4)
+        self.texture_video.swizzle = "BGRA"
 
-            target_w = self.width()
-            target_h = self.height()
+        # ======================================
+        # Warp UV texture (body size → screen size)
+        map_x, map_y, valid_mask = self.warp_info_all
+        tw, th = self.width(), self.height()
 
-            map_x_resized = cv2.resize(
-                map_x, (target_w, target_h), interpolation=cv2.INTER_LINEAR
-            )
-            map_y_resized = cv2.resize(
-                map_y, (target_w, target_h), interpolation=cv2.INTER_LINEAR
-            )
-
-            uv_data = np.dstack([map_x_resized, map_y_resized]).astype("f4")
-
-            print(
-                f"[DEBUG] proj warp_uv "
-                f"src={cap_w}x{cap_h} → dst={target_w}x{target_h}, "
-                f"map_x min/max={uv_data[...,0].min():.3f}/{uv_data[...,0].max():.3f}"
-            )
-
-        else:
-            # warp_map が無い場合：恒等UVを表示解像度で生成
-            target_w = self.width()
-            target_h = self.height()
-
-            xs = np.linspace(0.0, 1.0, target_w, dtype=np.float32)
-            ys = np.linspace(0.0, 1.0, target_h, dtype=np.float32)
-
-            u, v = np.meshgrid(xs, ys)
-            uv_data = np.dstack([u, v]).astype("f4")
-
-            print("[DEBUG] identity warp UV")
-
-        # warp UV テクスチャ生成（★必ず表示解像度★）
-        warp_h, warp_w = uv_data.shape[:2]
+        map_x = cv2.resize(map_x, (tw, th), interpolation=cv2.INTER_LINEAR)
+        map_y = cv2.resize(map_y, (tw, th), interpolation=cv2.INTER_LINEAR)
+        uv_data = np.dstack([map_x, map_y]).astype("f4")
 
         self.texture_warp = self.ctx.texture(
-            (warp_w, warp_h),
+            (uv_data.shape[1], uv_data.shape[0]),
             2,
             data=uv_data,
             dtype="f4"
         )
 
-        # シェーダーにテクスチャ番号を教える
-        self.prog['original_tex'].value = 0
-        self.prog['warp_uv_tex'].value = 1
-        self.prog["slice_left"].value = self.slice_valid_left
-        self.prog["slice_right"].value = self.slice_valid_right
+        valid_mask = cv2.resize(valid_mask, (tw, th), interpolation=cv2.INTER_NEAREST)
+
+        self.texture_mask = self.ctx.texture(
+            (tw, th),
+            1,
+            data=valid_mask.astype("f4"),
+            dtype="f4"
+        )
+
+        # ======================================
+        # ★ 正しい overlap / body / cap 計算 ★
+        overlap_l_px = self.source_geometry["overlap_left"]
+        overlap_r_px = self.source_geometry["overlap_right"]
+        body_w_px    = self.source_geometry["body_width"]
+        cap_w_px     = overlap_l_px + body_w_px + overlap_r_px
+
+        cap_offset  = overlap_l_px / cap_w_px
+        body_to_cap = body_w_px / cap_w_px
+        overlap_norm = overlap_l_px / body_w_px if body_w_px > 0 else 0.0
+
+        # ======================================
+        # Uniforms
+        self.prog["original_tex"].value = 0
+        self.prog["warp_uv_tex"].value = 1
+        self.prog["warp_mask_tex"].value = 2
+
+        self.prog["cap_offset"].value  = cap_offset
+        self.prog["body_to_cap"].value = body_to_cap
+        self.prog["overlap_norm"].value = overlap_norm
+
+        self.prog["fade_left"].value  = 1 if self.slice_index > 0 else 0
+        self.prog["fade_right"].value = 1 if self.slice_index < self.slice_count - 1 else 0
         self.prog["enable_blend"].value = 1 if self.enable_blend else 0
-        self.prog["slice_index"].value = self.slice_index
-        self.prog["slice_count"].value = self.slice_count
 
     def resizeGL(self, w, h):
         # ★ これが「GPUが実際に描くサイズ」
@@ -273,7 +228,6 @@ class GLDisplayWindow(QOpenGLWidget):
 
         # ★ Qt が viewport を上書きした直後なので、ここで再設定する
         dpr = self.devicePixelRatioF()
-
         w = int(self.width() * dpr)
         h = int(self.height() * dpr)
 
@@ -290,6 +244,7 @@ class GLDisplayWindow(QOpenGLWidget):
         # 3. 描画実行 (GPU)
         self.texture_video.use(0)
         self.texture_warp.use(1)
+        self.texture_mask.use(2)
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
         if not hasattr(self, "_once"):
@@ -311,121 +266,91 @@ def main():
 
     app = QApplication(sys.argv)
 
-    # --- Ctrl+C (SIGINT)を有効化する処理 ★ここを追加★ ---
-    # 1. SIGINT のハンドラをデフォルトに戻す
+    # --- Ctrl+C (SIGINT) を有効化 ---
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    
-    # 2. PyQtのイベントループが実行中でも、Pythonがシグナルをチェックするように
-    # わずかな間隔で空の QTimer を発火させる（Pythonインタプリタに制御を戻すためのハック）
     timer = QTimer()
-    timer.start(100) # 100msごとにチェック
-    timer.timeout.connect(lambda: None) 
-    # ---------------------------------------------------
+    timer.start(100)
+    timer.timeout.connect(lambda: None)
 
-    # --- 入力された source / targets を内部IDに統一 ---
+    # --- 仮想IDに統一 ---
     src_vid = get_virtual_id(args.source)
-    tgt_vids = [get_virtual_id(t) for t in args.targets]
-
     if not src_vid:
         print(f"❌ ソース {args.source} の内部ID変換に失敗")
         sys.exit(1)
 
+    tgt_vids = [get_virtual_id(t) for t in args.targets if get_virtual_id(t)]
     args.source = src_vid
-    args.targets = [get_virtual_id(t) for t in args.targets if get_virtual_id(t)]
+    args.targets = tgt_vids
 
-
-    # --- QScreen を名前別に取得（QScreen.name() と仮想ID の両方をキーにする） ---
+    # --- QScreen 取得 ---
     screens_by_name = {}
-    # 追加で仮想 ID (D1, D2, ...) もキーにしておく（main.py から D* が渡されても解決できるように）
     for s in QGuiApplication.screens():
         vid = get_virtual_id(s.name())
         if vid:
             screens_by_name[vid] = s
-    # -------------------------------------------------------------------------
 
     if args.source not in screens_by_name:
         print(f"❌ ソースディスプレイが見つかりません: {args.source}")
         sys.exit(1)
 
     source_screen = screens_by_name[args.source]
+    sg = source_screen.geometry()
 
-    # total_width は targets のうち見つかったスクリーン幅の合計
-    total_width = sum(screens_by_name[n].geometry().width() for n in args.targets if n in screens_by_name)
-    # max_height は利用可能なスクリーン全体の最大高さ（または targets の最大高さでも良い）
-    max_height = max((s.geometry().height() for s in screens_by_name.values()), default= source_screen.geometry().height())
-    virtual_size = (total_width, max_height)
-
-    windows = []
-    offset_x = 0
-
-    # まず source のジオメトリを取得しておく
-    source_screen = screens_by_name[args.source]
-    sg = source_screen.geometry()   # ★ source geometry はここで一度だけ
-
-    # ★ 追加：source の左上（仮想デスクトップ基準）
     src_base_x = sg.x()
     src_base_y = sg.y()
 
     slice_count = len(args.targets)
-    overlap_ratio = 0.1 if slice_count > 1 else 0.0
     slice_w = sg.width() // slice_count
-    overlap_px = int(slice_w * overlap_ratio)
     slice_h = sg.height()
 
-    # 各ターゲットディスプレイごとにウィンドウを作成
+    overlap_ratio = 0.1 if slice_count > 1 else 0.0
+    overlap_px = int(slice_w * overlap_ratio)
+
+    windows = []
+
+    # ==========================================================
+    # 各ターゲットディスプレイ
+    # ==========================================================
     for proj_index, name in enumerate(args.targets):
 
-        slice_x = src_base_x + slice_w * proj_index
-        slice_y = src_base_y
+        body_x = src_base_x + slice_w * proj_index
 
         # -------------------------------
-        # overlap 計算（方法A：端は片側）
+        # overlap 計算（キャプチャ専用）
         # -------------------------------
         if slice_count == 1:
-            # 1画面のみ（overlap なし）
-            overlap_l = 0
-            overlap_r = 0
-            cap_x = slice_x
-            cap_w = slice_w
-
+            overlap_l = overlap_r = 0
         else:
-            body_x = src_base_x + slice_w * proj_index
-
             if proj_index == 0:
-                # 先頭：右のみ overlap
                 overlap_l = 0
                 overlap_r = overlap_px
-
             elif proj_index == slice_count - 1:
-                # 末尾：左のみ overlap
                 overlap_l = overlap_px
                 overlap_r = 0
-
             else:
-                # 中央：左右 overlap
                 overlap_l = overlap_px
                 overlap_r = overlap_px
 
-            cap_x = body_x - overlap_l
-            cap_w = slice_w + overlap_l + overlap_r
+        cap_x = body_x - overlap_l
+        cap_w = slice_w + overlap_l + overlap_r
 
         # -------------------------------
         # 画面外クランプ
         # -------------------------------
         cap_x = max(src_base_x, cap_x)
-
         max_x = src_base_x + sg.width() - cap_w
         cap_x = min(cap_x, max_x)
 
         slice_geometry = {
             "x": cap_x,
-            "y": slice_y,
-            "w": cap_w,
+            "y": src_base_y,
+            "w": cap_w,                 # ★ キャプチャ幅（body + overlap）
             "h": slice_h,
             "index": proj_index,
             "count": slice_count,
             "overlap_left": overlap_l,
             "overlap_right": overlap_r,
+            "body_width": slice_w,      # ★ warp 用（重要）
         }
 
         if name not in screens_by_name:
@@ -434,10 +359,13 @@ def main():
 
         target_screen = screens_by_name[name]
 
+        # ======================================================
+        # ★ warp は body 幅のみで計算する ★
+        # ======================================================
         warp_info = prepare_warp(
             name,
             args.mode,
-            (slice_geometry["w"], slice_geometry["h"]),
+            (slice_w, slice_h),          # ← cap ではなく body
             load_points_func=load_points,
             log_func=log
         )
@@ -459,7 +387,6 @@ def main():
         sys.exit(1)
 
     sys.exit(app.exec_())
-
 
 if __name__ == "__main__":
     main()

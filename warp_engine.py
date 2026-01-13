@@ -102,7 +102,6 @@ except Exception:
 # prepare_warp (CPU計算のみ)
 # ----------------------------------------------------------------------
 def prepare_warp(display_name, mode, src_size,
-                 overlap_px=0,
                  load_points_func=None,
                  log_func=None):
 
@@ -131,24 +130,12 @@ def prepare_warp(display_name, mode, src_size,
             pts = None
 
     # ==================================================
-    # slice → full screen mapping
-    # ==================================================
-    slice_left = 0
-    full_width = w
-
-    key = display_name.replace("\\", "").replace(".", "")
-    if key in DISPLAY_TO_SIMSET:
-        info = DISPLAY_TO_SIMSET[key]
-        slice_left = int(info.get("left", 0))
-        full_width = int(info.get("full_width", w))
-
-    # ==================================================
-    # base grid（LOCAL 0–1）
+    # base grid（body 専用 0–1）
     # ==================================================
     xs = np.tile(np.arange(w, dtype=np.float32), (h, 1))
     ys = np.tile(np.arange(h, dtype=np.float32)[:, None], (1, w))
 
-    grid_u_local = xs / max(w - 1, 1)
+    grid_u = xs / max(w - 1, 1)
     grid_v = ys / max(h - 1, 1)
 
     # ==================================================
@@ -156,59 +143,45 @@ def prepare_warp(display_name, mode, src_size,
     # ==================================================
     if mode == "perspective" and pts is not None and len(pts) >= 4:
         grid_pts = np.array(pts[:4], np.float32)
-        if grid_pts.max() > 1.5:
+
+        if grid_pts.max() <= 1.5:
+            grid_pts[:, 0] *= (w - 1)
+            grid_pts[:, 1] *= (h - 1)
+        else:
             grid_pts[:, 0] *= w / 1920.0
             grid_pts[:, 1] *= h / 1080.0
 
         M = generate_perspective_matrix(src_size, grid_pts)
-        grid_u_local = cv2.warpPerspective(grid_u_local, M, (w, h))
+
+        grid_u = cv2.warpPerspective(grid_u, M, (w, h))
         grid_v = cv2.warpPerspective(grid_v, M, (w, h))
 
-        grid_u_local = np.clip(grid_u_local, 0.0, 1.0)
+        grid_u = np.clip(grid_u, 0.0, 1.0)
         grid_v = np.clip(grid_v, 0.0, 1.0)
 
-    # ==================================================
-    # LOCAL → GLOBAL
-    # ==================================================
-    grid_u = (slice_left + grid_u_local * (w - 1)) / max(full_width - 1, 1)
+        valid_mask = np.ones((h, w), np.float32)
 
-    # ==================================================
-    # mask
-    # ==================================================
-    grid_mask = np.ones((h, w), dtype=bool)
-
-    if mode == "warp_map" and pts is not None and len(pts) >= 8:
-        poly = np.array(pts, np.float32)
-        if poly.max() <= 1.5:
-            poly[:, 0] *= w
-            poly[:, 1] *= h
-        else:
-            poly[:, 0] *= w / 1920.0
-            poly[:, 1] *= h / 1080.0
-
-        mask_img = np.zeros((h, w), np.uint8)
-        cv2.fillPoly(mask_img, [poly.astype(np.int32)], 1)
-        if np.count_nonzero(mask_img) > 0:
-            grid_mask = mask_img.astype(bool)
-
-    if mode == "perspective":
         warp_cache[cache_key] = (
             grid_u.astype(np.float32),
-            grid_v.astype(np.float32)
+            grid_v.astype(np.float32),
+            valid_mask
         )
         return warp_cache[cache_key]
 
     # ==================================================
-    # warp_map : 曲線外周 → 曲線補間グリッド → セル単位射影押し込み
+    # warp_map
     # ==================================================
     if mode != "warp_map" or pts is None:
-        return None
+        valid_mask = np.ones((h, w), np.float32)
+        warp_cache[cache_key] = (
+            grid_u.astype(np.float32),
+            grid_v.astype(np.float32),
+            valid_mask
+        )
+        return warp_cache[cache_key]
 
     pts_np = np.asarray(pts, np.float32)
 
-    # ------------------------------
-    # 正規化（pts → pixel）
-    # ------------------------------
     if pts_np.max() <= 1.5:
         pts_np[:, 0] *= (w - 1)
         pts_np[:, 1] *= (h - 1)
@@ -233,7 +206,7 @@ def prepare_warp(display_name, mode, src_size,
     left   = left[::-1]
 
     # ------------------------------
-    # 距離ベース等間隔再サンプリング
+    # 再サンプリング
     # ------------------------------
     def resample_curve(curve, n):
         d = np.linalg.norm(curve[1:] - curve[:-1], axis=1)
@@ -249,7 +222,7 @@ def prepare_warp(display_name, mode, src_size,
     left   = resample_curve(left,   10)
 
     # ------------------------------
-    # Coons Patch による 10x10 グリッド生成
+    # Coons Patch
     # ------------------------------
     grid = np.zeros((10, 10, 2), np.float32)
 
@@ -257,30 +230,27 @@ def prepare_warp(display_name, mode, src_size,
         v = j / 9.0
         for i in range(10):
             u = i / 9.0
-
             B = (
                 (1 - v) * top[i] +
                 v * bottom[i] +
                 (1 - u) * left[j] +
                 u * right[j]
             )
-
             C = (
                 (1 - u) * (1 - v) * top[0] +
                 u * (1 - v) * top[9] +
                 (1 - u) * v * bottom[0] +
                 u * v * bottom[9]
             )
-
             grid[j, i] = B - C
 
     # ------------------------------
-    # 各セルの逆射影行列＋マスク生成
+    # セル単位逆射影
     # ------------------------------
     map_x = np.zeros((h, w), np.float32)
     map_y = np.zeros((h, w), np.float32)
-
-    filled_mask = np.zeros((h, w), np.uint8)
+    filled = np.zeros((h, w), np.uint8)
+    valid_mask = np.zeros((h, w), np.float32)
 
     for j in range(9):
         for i in range(9):
@@ -292,35 +262,37 @@ def prepare_warp(display_name, mode, src_size,
             ], np.float32)
 
             src = np.array([
-                [i / 9,     j / 9],
-                [(i+1)/9,   j / 9],
+                [i/9,   j/9],
+                [(i+1)/9, j/9],
                 [(i+1)/9, (j+1)/9],
-                [i / 9,   (j+1)/9]
+                [i/9,   (j+1)/9]
             ], np.float32)
 
             Hinv = cv2.getPerspectiveTransform(dst, src)
 
-            # セルマスク作成
             cell_mask = np.zeros((h, w), np.uint8)
             cv2.fillPoly(cell_mask, [dst.astype(np.int32)], 1)
 
-            ys, xs = np.where((cell_mask == 1) & (filled_mask == 0))
+            ys, xs = np.where((cell_mask == 1) & (filled == 0))
             if len(xs) == 0:
                 continue
 
-            pts_xy = np.stack([xs, ys, np.ones_like(xs)], axis=1).astype(np.float32)
+            pts_xy = np.stack([xs, ys, np.ones_like(xs)], axis=1)
             uvw = (Hinv @ pts_xy.T).T
 
-            valid = uvw[:, 2] != 0.0
-            uv = np.zeros((len(xs), 2), np.float32)
-            uv[valid, 0] = uvw[valid, 0] / uvw[valid, 2]
-            uv[valid, 1] = uvw[valid, 1] / uvw[valid, 2]
+            valid = uvw[:, 2] != 0
+            u = np.zeros(len(xs), np.float32)
+            v = np.zeros(len(xs), np.float32)
 
-            map_x[ys, xs] = np.clip(uv[:, 0], 0.0, 1.0)
-            map_y[ys, xs] = np.clip(uv[:, 1], 0.0, 1.0)
-            filled_mask[ys, xs] = 1
+            u[valid] = uvw[valid, 0] / uvw[valid, 2]
+            v[valid] = uvw[valid, 1] / uvw[valid, 2]
 
-    warp_cache[cache_key] = (map_x, map_y)
+            map_x[ys, xs] = np.clip(u, 0.0, 1.0)
+            map_y[ys, xs] = np.clip(v, 0.0, 1.0)
+            filled[ys, xs] = 1
+            valid_mask[ys, xs] = 1.0
+
+    warp_cache[cache_key] = (map_x, map_y, valid_mask)
     return warp_cache[cache_key]
 
 # ----------------------------------------------------------------------

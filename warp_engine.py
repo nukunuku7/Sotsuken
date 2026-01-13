@@ -1,15 +1,7 @@
 # warp_engine.py (CPU専用版)
-import os
 import json
-import math
 import numpy as np
 import cv2
-
-# try import environment_config generated from Blender
-try:
-    from config.environment_config import environment_config
-except Exception:
-    environment_config = None
 
 warp_cache = {}
 
@@ -24,60 +16,6 @@ def _log(msg, log_func=None):
             print(msg)
     else:
         print(msg)
-
-# ----------------------------------------------------------------------
-# Math helpers (CPU)
-# ----------------------------------------------------------------------
-def _normalize(v):
-    v = np.asarray(v, dtype=np.float64)
-    n = np.linalg.norm(v)
-    return v if n == 0 else v / n
-
-def _fit_plane(points):
-    pts = np.asarray(points, dtype=np.float64)
-    centroid = pts.mean(axis=0)
-    cov = np.cov((pts - centroid).T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    normal = eigvecs[:, 0]
-    u = eigvecs[:, 2]
-    v = eigvecs[:, 1]
-    return centroid, _normalize(u), _normalize(v), _normalize(normal)
-
-def _nearest_along_ray(ray_o, ray_d, points, t_min=0.0, t_max=10.0):
-    pts = np.asarray(points, dtype=np.float64)
-    vecs = pts - ray_o[None, :]
-    t_vals = np.dot(vecs, ray_d)
-    mask = t_vals > t_min
-    if not np.any(mask):
-        return None, None, None
-    candidate_pts = pts[mask]
-    ts = t_vals[mask]
-    projected = ray_o[None, :] + np.outer(ts, ray_d)
-    dists = np.linalg.norm(projected - candidate_pts, axis=1)
-    idx = np.argmin(dists)
-    best_t = ts[idx]
-    if best_t < t_min or best_t > t_max:
-        return None, None, None
-    return candidate_pts[idx], float(best_t), float(dists[idx])
-
-def _estimate_normals_for_pointcloud(pts, k=16):
-    pts = np.asarray(pts, dtype=np.float64)
-    n = len(pts)
-    normals = np.zeros_like(pts)
-    for i in range(n):
-        dists = np.linalg.norm(pts - pts[i], axis=1)
-        idx = np.argsort(dists)[:min(k, n)]
-        neigh = pts[idx]
-        centroid = neigh.mean(axis=0)
-        cov = np.cov((neigh - centroid).T)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        normals[i] = _normalize(eigvecs[:, 0])
-    return normals
-
-def _reflect(d, n):
-    d = _normalize(d)
-    n = _normalize(n)
-    return d - 2.0 * np.dot(d, n) * n
 
 # ----------------------------------------------------------------------
 # Perspective matrix

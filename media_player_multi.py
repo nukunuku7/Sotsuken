@@ -40,8 +40,13 @@ class GLDisplayWindow(QOpenGLWidget):
         self.overlap_l_px = source_geometry["overlap_left"]
         self.overlap_r_px = source_geometry["overlap_right"]
         self.body_w_px = source_geometry["body_width"]
-        self.cap_w_px = self.overlap_l_px + self.body_w_px + self.overlap_r_px
-
+        SAFE_PAD = 4  # ★ 2〜4 推奨
+        self.cap_w_px = (
+            self.overlap_l_px +
+            self.body_w_px +
+            self.overlap_r_px +
+            SAFE_PAD * 2
+        )
         self.enable_blend = self.slice_count > 1
 
         # ----------------------------
@@ -51,7 +56,7 @@ class GLDisplayWindow(QOpenGLWidget):
         # キャプチャは body + overlap
         self.monitor = {
             "top": source_geometry["y"],
-            "left": source_geometry["x"],
+            "left": source_geometry["x"] - SAFE_PAD,
             "width": self.cap_w_px,
             "height": source_geometry["h"],
         }
@@ -60,7 +65,7 @@ class GLDisplayWindow(QOpenGLWidget):
         # キャプチャ正規化
         # ----------------------------
         self.body_to_cap = self.body_w_px / self.cap_w_px
-        self.cap_offset = self.overlap_l_px / self.cap_w_px
+        self.cap_offset  = (self.overlap_l_px + SAFE_PAD) / self.cap_w_px
         self.overlap_norm = self.overlap_l_px / self.body_w_px if self.body_w_px > 0 else 0.0
 
         self.timer = QTimer()
@@ -81,6 +86,7 @@ class GLDisplayWindow(QOpenGLWidget):
 
         if self.enable_blend:
             self.ctx.enable(moderngl.BLEND)
+            # プリマルチプライド・アルファ
             self.ctx.blend_func = (
                 moderngl.ONE,
                 moderngl.ONE_MINUS_SRC_ALPHA,
@@ -117,41 +123,89 @@ class GLDisplayWindow(QOpenGLWidget):
                 in vec2 v_uv;
                 out vec4 fragColor;
 
-                void main() {
+                void main()
+                {
+                    /* ===============================
+                    warp 有効領域チェック
+                    =============================== */
                     float mask = texture(warp_mask_tex, v_uv).r;
                     if (mask < 0.5)
                         discard;
 
+                    /* ===============================
+                    warp UV（body 空間）
+                    warp_uv は「body 全体」を 0〜1
+                    =============================== */
                     vec2 warp_uv = texture(warp_uv_tex, v_uv).rg;
 
-                    // body → cap
+                    /* warp_map の壊れセル防御 */
+                    if (warp_uv.x <= 0.0 || warp_uv.x >= 1.0 ||
+                        warp_uv.y <= 0.0 || warp_uv.y >= 1.0)
+                        discard;
+
+                    float body_u = warp_uv.x;   // ★ フェード判定は必ず body 空間で行う
+
+                    /* ===============================
+                    body → capture UV 変換
+                    =============================== */
                     vec2 cap_uv;
-                    cap_uv.x = warp_uv.x * body_to_cap + cap_offset;
+                    cap_uv.x = body_u * body_to_cap + cap_offset;
                     cap_uv.y = warp_uv.y;
 
-                    vec4 color = texture(original_tex, cap_uv);
+                    /* SAFE_PAD + LINEAR 対策 */
+                    cap_uv = clamp(cap_uv, vec2(0.001), vec2(0.999));
+
+                    vec4 src = texture(original_tex, cap_uv);
+
+                    /* ===============================
+                    フェード alpha 計算（意味ズレ修正済）
+                    =============================== */
+                    float alpha = 1.0;
+                    bool in_fade = false;
 
                     if (enable_blend == 1 && overlap_norm > 0.0) {
-                        float alpha = 1.0;
 
-                        if (fade_left == 1 && warp_uv.x < overlap_norm) {
-                            alpha = warp_uv.x / overlap_norm;
+                        /* 左フェード */
+                        if (fade_left == 1 && body_u < overlap_norm) {
+                            alpha = body_u / overlap_norm;
+                            in_fade = true;
                         }
-
-                        if (fade_right == 1 && warp_uv.x > 1.0 - overlap_norm) {
-                            alpha = (1.0 - warp_uv.x) / overlap_norm;
+                        /* 右フェード */
+                        else if (fade_right == 1 && body_u > 1.0 - overlap_norm) {
+                            alpha = (1.0 - body_u) / overlap_norm;
+                            in_fade = true;
                         }
-
-                        alpha = clamp(alpha, 0.0, 1.0);
-                        color.rgb *= alpha;
-                        color.a = alpha;
-
-                        if (color.a <= 0.0001)
-                            discard;
                     }
 
-                    fragColor = color;
+                    alpha = clamp(alpha, 0.0, 1.0);
+
+                    /* ===============================
+                    黒画素の完全排除
+                    =============================== */
+
+                    /* フェード内外を問わず「黒は光らない」 */
+                    bool invalid_uv =
+                        warp_uv.x <= 0.0 || warp_uv.x >= 1.0 ||
+                        warp_uv.y <= 0.0 || warp_uv.y >= 1.0;
+
+                    if (invalid_uv)
+                        discard;
+
+                    if (max(src.r, max(src.g, src.b)) < 0.001)
+                        discard;
+
+
+                    /* αがほぼ 0 は完全除外 */
+                    if (alpha <= 0.0001)
+                        discard;
+
+                    /* ===============================
+                    プリマルチプライド・アルファ出力
+                    =============================== */
+                    fragColor.rgb = src.rgb * alpha;
+                    fragColor.a   = alpha;
                 }
+
             """
         )
 
@@ -164,19 +218,23 @@ class GLDisplayWindow(QOpenGLWidget):
         )
 
         # ======================================
-        # Video texture (cap size)
+        # Video texture (capture size)
         cap_w = self.cap_w_px
         cap_h = self.source_geometry["h"]
 
         self.texture_video = self.ctx.texture((cap_w, cap_h), 4)
         self.texture_video.swizzle = "BGRA"
 
+        # ★ 黒混入防止の必須設定
+        self.texture_video.repeat_x = False
+        self.texture_video.repeat_y = False
+        self.texture_video.filter = (moderngl.LINEAR, moderngl.LINEAR)
+
         # ======================================
-        # Warp UV texture (body size → screen size)
+        # Warp UV texture
         map_x, map_y, valid_mask = self.warp_info_all
         tw, th = self.width(), self.height()
 
-        # resize to window framebuffer
         map_x = cv2.resize(map_x, (tw, th), interpolation=cv2.INTER_LINEAR)
         map_y = cv2.resize(map_y, (tw, th), interpolation=cv2.INTER_LINEAR)
         uv_data = np.dstack([map_x, map_y]).astype("f4")
@@ -202,12 +260,12 @@ class GLDisplayWindow(QOpenGLWidget):
         self.prog["warp_uv_tex"].value = 1
         self.prog["warp_mask_tex"].value = 2
 
-        self.prog["cap_offset"].value  = self.cap_offset
-        self.prog["body_to_cap"].value = self.body_to_cap
+        self.prog["cap_offset"].value   = self.cap_offset
+        self.prog["body_to_cap"].value  = self.body_to_cap
         self.prog["overlap_norm"].value = self.overlap_norm
 
-        self.prog["fade_left"].value  = 1 if self.slice_index > 0 else 0
-        self.prog["fade_right"].value = 1 if self.slice_index < self.slice_count - 1 else 0
+        self.prog["fade_left"].value   = 1 if self.slice_index > 0 else 0
+        self.prog["fade_right"].value  = 1 if self.slice_index < self.slice_count - 1 else 0
         self.prog["enable_blend"].value = 1 if self.enable_blend else 0
 
     def resizeGL(self, w, h):

@@ -146,19 +146,32 @@ def prepare_warp(display_name, mode, src_size,
     # ------------------------------
     # 再サンプリング
     # ------------------------------
-    def resample_curve(curve, n):
+    def resample_curve_fixed(curve, n):
+        # n 点（両端含む）
+        out = np.zeros((n, 2), np.float32)
+        out[0] = curve[0]
+        out[-1] = curve[-1]
+
+        if n <= 2:
+            return out
+
         d = np.linalg.norm(curve[1:] - curve[:-1], axis=1)
         s = np.concatenate([[0.0], np.cumsum(d)])
-        t = np.linspace(0, s[-1], n)
-        x = np.interp(t, s, curve[:, 0])
-        y = np.interp(t, s, curve[:, 1])
-        return np.stack([x, y], axis=1)
+        total = s[-1]
+
+        # 内部だけ再サンプリング
+        t = np.linspace(0, total, n)
+        for i in range(1, n - 1):
+            out[i, 0] = np.interp(t[i], s, curve[:, 0])
+            out[i, 1] = np.interp(t[i], s, curve[:, 1])
+
+        return out
 
     n = 32
-    top    = resample_curve(top,    n + 1)
-    right  = resample_curve(right,  n + 1)
-    bottom = resample_curve(bottom, n + 1)
-    left   = resample_curve(left,   n + 1)
+    top    = resample_curve_fixed(top,    n + 1)
+    right  = resample_curve_fixed(right,  n + 1)
+    bottom = resample_curve_fixed(bottom, n + 1)
+    left   = resample_curve_fixed(left,   n + 1)
 
     # ------------------------------
     # Coons Patch

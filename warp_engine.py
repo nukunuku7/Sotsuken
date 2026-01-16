@@ -154,15 +154,15 @@ def prepare_warp(display_name, mode, src_size,
         y = np.interp(t, s, curve[:, 1])
         return np.stack([x, y], axis=1)
 
-    top    = resample_curve(top,    10)
-    right  = resample_curve(right,  10)
-    bottom = resample_curve(bottom, 10)
-    left   = resample_curve(left,   10)
+    n = 32
+    top    = resample_curve(top,    n + 1)
+    right  = resample_curve(right,  n + 1)
+    bottom = resample_curve(bottom, n + 1)
+    left   = resample_curve(left,   n + 1)
 
     # ------------------------------
     # Coons Patch
     # ------------------------------
-    n = 9
     grid = np.zeros((n + 1, n + 1, 2), np.float32)
 
     for j in range(n + 1):

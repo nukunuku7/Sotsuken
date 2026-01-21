@@ -1,1 +1,12 @@
-{}
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.pythonProjects": [],
+    "python.defaultInterpreterPath": "${workspaceFolder}/sovenv/Scripts/python.exe",
+    "terminal.integrated.defaultProfile.windows": "PowerShell",
+    "terminal.integrated.profiles.windows": {
+        "PowerShell": {
+            "path": "powershell.exe",
+            "args": ["-NoExit", "-Command", "Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser; & .\\sovenv\\Scripts\\Activate.ps1"]
+        }
+    }
+}

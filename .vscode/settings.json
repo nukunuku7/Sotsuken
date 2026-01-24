@@ -1,5 +1,5 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
     "python-envs.pythonProjects": [],
     "python.defaultInterpreterPath": "${workspaceFolder}/sovenv/Scripts/python.exe",
     "terminal.integrated.defaultProfile.windows": "PowerShell",
